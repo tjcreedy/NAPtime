@@ -1,0 +1,442 @@
+#!/usr/bin/perl
+#By Thomas J Creedy, thomas@tjcreedy.co.uk
+
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use Data::Dumper;
+#use Array::Utils;
+
+my $version = "0.1.1"; #30/4/17
+
+my $help;
+my @tables_paths;
+my $columns = "1,2,3";
+my $errortolerance = 0.1;
+my $outpath;
+my $convert;
+my $wipe;
+my $verbose;
+my $pairs = "none";
+
+my $script = basename($0, ());
+
+########################################################
+# USAGE
+#
+my $usage =<<USAGE;
+
+
+Description:
+
+	This is $script version $version of the NGS Amplicon Pipeline. It takes in a set of raw sequence file pairs and demultiplexes according to a table, outputting sets of files according to the tags and names supplied in the table. Multiple tables can be supplied if many projects overlap.
+	Additionally, will make sure that output file pairs have properly paired sequences inside, and can also scrounge missing pairs from reads that had no tag detected.
+
+Usage:
+
+	$script --table <table1.txt> [--columns 1,2,4] --output <dir> [--wipe] [--pairs <option>] [-e <n>] [--table <table2.txt>] [--convert <ctable.csv] <for_a1.fq> <rev_a1.fq> <for_a2.fq> <rev_a2.fq>
+
+Arguments:
+
+	  table: The file path of a tab delimited table detailing barcode sequences and sample names, see above. Each table requires a separate --table argument.
+	columns: The column numbers, separated by commas, of the sample names, forward barcode sequence, reverse barcode sequence, and well ID, respectively. The numbers must be in this order, but the well ID is optional. Default: 1,2,3
+	outpath: The path to a directory in which place output files. Directories will be created if they do not exist.
+	   wipe: Remove all files in the output directory if it already exists. Will not do anything if the output directory doesn't exist.
+	errortolerance: The maximum error rate for cutadapt to allow tag matching, see cutadapt documentation. Default 0.1
+	  pairs: The method to use to re-pair reads. Only "none", "strict" or "scrounge" are allowed. Default: none.
+	convert: The file path of an optional two-column table specifying the well number for each filename.
+	verbose: Reports on progress.
+	version: Prints the version.
+	   help:  Prints out this helpful message.
+
+USAGE
+#
+######################################################
+
+GetOptions("table=s"	=> \@tables_paths,
+	   "convert=s"	=> \$convert,
+	   "columns=s"	=> \$columns,
+	   "version=s"	=> \$version,
+	   "output=s"	=> \$outpath,
+	   "pairs=s"	=> \$pairs,
+	   "wipe"	=> \$wipe,
+	   "verbose"	=> \$verbose,
+	   "help"	=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
+
+print "$usage\n" and exit if($help);
+
+if(scalar @ARGV == 0){
+	die "I need me some files to demux, see \"$script --help\" for more information\n";
+}
+
+my @files = @ARGV;
+
+if(!defined $outpath){
+	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
+} else {
+	if (-e $outpath) {
+		opendir my $dh, $outpath or die "Can't open $outpath\n";
+		my @contents = readdir($dh);
+		closedir $dh;
+		if ($wipe && scalar @contents >2) {
+			print "Wiping contents of $outpath before starting\n" if $verbose;
+			remove_tree($outpath,{keep_root => 1}) or die "Error, could not wipe contents of $outpath\n";
+		} elsif(scalar @contents >2) {  # only . and .. will be in the contents scalar if empty
+			warn "Warning: Output directory already exists and contains files. This may induce bugs in running $script. You may wish to run $script again with the --wipe option enabled";
+		}
+	}
+	make_path($outpath);
+}
+
+my $scroungeopt;
+$pairs =~ /(\w+)(?:-(\w+))?/;
+$pairs = $1;
+$scroungeopt = $2 if $2;
+die "Error: Unknown parameter passed to pairs, see $script --help\n" unless ($pairs eq "none"||$pairs eq "strict"|| ($pairs eq "scrounge" && $2 && ($scroungeopt eq "merge" || $scroungeopt eq "separate")));
+print "Pairing option is \"$pairs\"" if $verbose;
+print " and scrounging option is \"$scroungeopt\"" if($verbose  && $scroungeopt);
+print "\n" if $verbose;
+
+
+
+my $masterpairs = $pairs;
+
+print "Parsing input files\n" if $verbose ;
+my %paired_files=find_pairs(\@files,$convert);
+
+
+
+
+print "Parsing barcode table(s)\n" if $verbose ;
+my %demux_tags = parse_barcodefiles(\@tables_paths, $columns);
+
+my %log;
+
+print "Starting to demultiplex\n" if $verbose ;
+foreach my $welln (sort keys %paired_files){
+	print "Preparing to demux files $welln\n" if $verbose ;
+	my $R1adapter_line = "";
+	my $R2adapter_line = "";
+	my $untagged_output="unknown.$welln";
+	
+	my @taggedsamples;
+	
+	foreach my $sample (keys %{$demux_tags{$welln}}){
+		if(defined $demux_tags{$welln}{$sample}[0]){
+			$R1adapter_line .= "-g $sample=^$demux_tags{$welln}{$sample}[0] ";
+			$R2adapter_line .= "-g $sample=^$demux_tags{$welln}{$sample}[1] ";
+			push @taggedsamples,$sample;
+		} else {
+			$untagged_output = "$sample";
+		}
+	}
+	my $R1cmd = "cutadapt $R1adapter_line -e $errortolerance -o $outpath\{name}_R1.fq --untrimmed-output $outpath$untagged_output\_R1.fq $paired_files{$welln}[0]";
+	my $R2cmd = "cutadapt $R2adapter_line -e $errortolerance -o $outpath\{name}_R2.fq --untrimmed-output $outpath$untagged_output\_R2.fq $paired_files{$welln}[1]";
+	print "Running cutadapt on files $welln\n" if $verbose;
+	#print "R1cmd:\n",$R1cmd,"\n\n";
+	#print "R2cmd:\n",$R2cmd,"\n\n";
+	
+	my $R1cutlog = `$R1cmd`;
+	my $R2cutlog = `$R2cmd`;
+
+	print "Cutadapt complete, parsing logs\n" if $verbose;
+	my $R1log = parse_cutlog($R1cutlog,$untagged_output);
+	my $R2log = parse_cutlog($R2cutlog,$untagged_output);
+	
+	$log{$welln}{R1} = { %$R1log };
+	$log{$welln}{R2} = { %$R2log };
+	print "Demultiplexing complete for $welln\n" if $verbose;
+	next if($pairs eq "none");
+	
+	my $unR1;
+	my $unR2;
+	my @allscrounged;
+	
+	if($pairs eq "scrounge"){
+		my $n_unR1 = $log{$welln}{R1}{$untagged_output}{n_tagged_reads_found};
+		my $n_unR2 = $log{$welln}{R2}{$untagged_output}{n_tagged_reads_found};
+		
+		if($n_unR1 == 0){
+			if($n_unR2 == 0){
+				print "No untagged reads, scrounging not possible: switching to strict pairing for $welln\n" if $verbose;
+				
+				$pairs = "strict";
+			} else {
+				print "No untagged R1 reads, will only scrounge from R2\n" if $verbose;
+				}
+		} elsif($n_unR2 == 0){
+			print "No untagged R2 reads, will only scrounge from R1\n" if $verbose;
+		} else {
+			print "Untagged reads present for both R1 and R2, proceeding to scrounge merrily\n" if $verbose;
+		}
+		
+		$unR1 = read_and_remove_fq($untagged_output,"R1") unless $n_unR1==0;
+		$unR2 = read_and_remove_fq($untagged_output,"R2") unless $n_unR2==0;
+	}
+	foreach my $sample (@taggedsamples){
+		my $n_fqR1 = $log{$welln}{R1}{$sample}{n_tagged_reads_found};
+		my $n_fqR2 = $log{$welln}{R2}{$sample}{n_tagged_reads_found};
+		
+		my $fqR1;
+		$fqR1 = read_and_remove_fq($sample,"R1") unless $n_fqR1 == 0;
+		my $fqR2;
+		$fqR2 = read_and_remove_fq($sample,"R2") unless $n_fqR2 == 0;
+		
+		print "Searching for matepairs in $sample\n" if $verbose;
+		#my @paired = intersect(keys %$fqR1, keys %$fqR2);
+		my @paired = grep { $fqR1->{$_} } keys %$fqR2;
+
+		$log{$welln}{R1}{$sample}{n_matepairs_found} = scalar @paired;
+		$log{$welln}{R2}{$sample}{n_matepairs_found} = scalar @paired;
+		
+		if(scalar @paired == 0){
+			print "No matepairs found for $sample\n" if $verbose;
+		} else {
+			printf "Found %d matepairs for $sample\n", $#paired+1 if $verbose;
+			if(! ($pairs eq "scrounge" && $scroungeopt eq "merge")){
+			writefq($sample,"R1",$fqR1,\@paired);
+			writefq($sample,"R2",$fqR2,\@paired);
+			}
+		}
+		
+#		print Dumper \@paired;
+		
+		
+		print "Finding singletons for $sample\n" if($pairs eq "strict" && $verbose);
+		#my @R1singles = array_minus(keys %$fqR1, @paired);
+		#my @R2singles = array_minus(keys %$fqR2, @paired);
+		my %paired_hs = map {$_=>1} @paired;
+		my @R1singles = grep { ! exists $paired_hs{$_} } keys %$fqR1;
+		my @R2singles = grep { ! exists $paired_hs{$_} } keys %$fqR2;
+		
+		$log{$welln}{R1}{$sample}{n_singletons} = scalar @R1singles;
+		$log{$welln}{R2}{$sample}{n_singletons} = scalar @R2singles;
+		
+		if($pairs eq "strict"){
+			printf "Writing %d singletons for $sample R1\n", $#R1singles+1 if $verbose;
+			writefq($sample,"R1.singletons",$fqR1,\@R1singles) unless scalar @R1singles == 0;
+			printf "Writing %d singletons for $sample R2\n", $#R2singles+1 if $verbose;
+			writefq($sample,"R2.singletons",$fqR2,\@R2singles) unless scalar @R2singles == 0;
+			next;
+		}
+		print "Scrounging for lost matepairs for $sample in $untagged_output\n" if $verbose;
+		#my @R2scrounged = intersect(keys %$unR2,@R1singles);
+		#my @R1scrounged = intersect(keys %$unR1,@R2singles);
+		my @R2scrounged = grep { $unR2->{$_} } @R1singles;
+		my @R1scrounged = grep { $unR1->{$_} } @R2singles;
+		
+		$log{$welln}{R1}{$sample}{n_matepairs_scrounged} = scalar @R2scrounged;
+		$log{$welln}{R2}{$sample}{n_matepairs_scrounged} = scalar @R1scrounged;
+		
+		my @scrounged = (@R1scrounged,@R2scrounged);
+		
+		
+		if (scalar @scrounged == 0){
+			print "Scrounging found no matches for $sample\n" if $verbose;
+		} else {
+#			print Dumper \@scrounged;
+			my $ttR1 = {%$unR1,%$fqR1};
+			my $ttR2 = {%$unR2,%$fqR2};
+			if($scroungeopt eq "separate"){
+				printf "Writing %d scrounged matepairs separately for $sample\n",$#scrounged+1 if $verbose;
+				writefq($sample,"R1.scrounged",$ttR1,\@scrounged);
+				writefq($sample,"R2.scrounged",$ttR2,\@scrounged);
+			} else {
+				my @total = (@paired, @scrounged);
+				printf "Writing %d total (paired and scrounged) matepairs for $sample\n",$#total+1 if $verbose;
+#				print Dumper \@total;
+				writefq($sample,"R1",$ttR1,\@total);
+				writefq($sample,"R2",$ttR2,\@total);
+				
+				$log{$welln}{R1}{$untagged_output}{total_paired_written} = scalar @total;
+				$log{$welln}{R2}{$untagged_output}{total_paired_written} = scalar @total;
+			}
+		}
+		print "Finding remaining singletons for $sample\n" if $verbose;
+		#@R1singles = array_minus(keys %$fqR1, (@paired,@scrounged));
+		#@R2singles = array_minus(keys %$fqR2, (@paired,@scrounged));
+		
+		my %joint_hs = map {$_=>1} (@paired,@scrounged);
+		@R1singles = grep { ! exists $joint_hs{$_} } keys %$fqR1;
+		@R2singles = grep { ! exists $joint_hs{$_} } keys %$fqR2;
+	
+		$log{$welln}{R1}{$sample}{n_singletons_remain} = scalar @R1singles;
+		$log{$welln}{R2}{$sample}{n_singletons_remain} = scalar @R2singles;
+	
+		printf "Writing %d singletons for $sample R1\n",$#R1singles+1 if $verbose;
+		writefq($sample,"R1.singletons",$fqR1,\@R1singles) unless scalar @R1singles == 0;
+		printf "Writing %d singletons for $sample R2\n",$#R2singles+1 if $verbose;
+		writefq($sample,"R2.singletons",$fqR2,\@R2singles) unless scalar @R2singles == 0;
+		
+		push(@allscrounged,@scrounged);
+	}
+	
+	if($pairs eq "scrounge"){
+		my %scrounged_hs = map {$_=>1} @allscrounged;
+		my @unR1remain = grep { ! exists $scrounged_hs{$_} } keys %$unR1;
+		my @unR2remain = grep { ! exists $scrounged_hs{$_} } keys %$unR2;
+		
+		$log{$welln}{R1}{$untagged_output}{n_reads_post_scrounging} = scalar @unR1remain;
+		$log{$welln}{R2}{$untagged_output}{n_reads_post_scrounging} = scalar @unR2remain;
+		
+		writefq($untagged_output,"R1.postscrounge",$unR1,\@unR1remain) unless scalar @unR1remain == 0;
+		writefq($untagged_output,"R2.postscrounge",$unR2,\@unR2remain) unless scalar @unR2remain == 0;
+	}
+	$pairs = $masterpairs;
+}
+
+open my $logout, '>', "$outpath/demultiplexing.log.csv";
+print $logout "well,direction,sampleid,n_tagged_reads_found";
+print $logout ",n_matepairs_found,n_singletons" if($masterpairs ne "none");
+print $logout ",n_matepairs_scrounged,n_singletons_remain,n_reads_post_scrounging" if($masterpairs eq "scrounge");
+print $logout ",total_paired_written" if($masterpairs eq "scrounge" && $scroungeopt eq "merge");
+foreach my $well (sort keys %log){
+	foreach my $dir (sort keys %{$log{$well}}){
+		foreach my $sample (sort keys %{$log{$well}{$dir}}) {
+			print $logout "\n$well,$dir,$sample,$log{$well}{$dir}{$sample}{n_tagged_reads_found}";
+			if($masterpairs ne "none") {
+				defined $log{$well}{$dir}{$sample}{n_matepairs_found} ? print $logout ",$log{$well}{$dir}{$sample}{n_matepairs_found}" : print $logout ",NA";
+				defined $log{$well}{$dir}{$sample}{n_singletons} ? print $logout ",$log{$well}{$dir}{$sample}{n_singletons}" : print $logout ",NA";
+				if($masterpairs eq "scrounge"){
+					defined $log{$well}{$dir}{$sample}{n_matepairs_scrounged} ? print $logout ",$log{$well}{$dir}{$sample}{n_matepairs_scrounged}" : print $logout ",NA";
+					defined $log{$well}{$dir}{$sample}{n_singletons_remain} ? print $logout ",$log{$well}{$dir}{$sample}{n_singletons_remain}" : print $logout ",NA";
+					defined $log{$well}{$dir}{$sample}{n_reads_post_scrounging} ? print $logout ",$log{$well}{$dir}{$sample}{n_reads_post_scrounging}" : print $logout ",NA";
+					if($scroungeopt eq "merge"){
+						defined $log{$well}{$dir}{$sample}{total_paired_written} ? print $logout ",$log{$well}{$dir}{$sample}{total_paired_written}" : print $logout ",NA";
+					}
+				}
+			}
+		}
+	}
+}
+close $logout;
+
+exit;
+
+sub find_pairs {
+	my ($allfiles,$convert) = @_;
+	my @allfiles = @$allfiles;
+	my %filepairs;
+	my %conversion;
+	if(defined $convert){
+		print "Converting file names into well numbers\n" if $verbose ;
+		open my $conv,'<',$convert or die "Error opening $convert\n";
+		while(my $row = <$conv>){
+			chomp $row;
+			my ($c_name,$c_well) = split /[\t,]+/, $row;
+			$conversion{$c_name} = $c_well;
+		}
+		close $conv;
+	}
+	foreach my $file (@allfiles){
+		my ($file_name,$dir)=fileparse($file);
+		if($file_name =~ /[^a-zA-Z\d]{0,1}([A-H])(\d{1,2})[^a-zA-Z\d].*_R([1|2])_/){
+			my $n = $2+0;
+			$filepairs{$1.$n}[$3-1]=$file;
+		}elsif(defined $convert && $file_name =~ /(.+)_R([1|2])/){
+			$filepairs{$conversion{$1}}[$2-1] = $file
+		}else{
+			warn "Input file $file does not contain '_R1_' or '_R2_' in name and/or cannot be matched in conversion table\n";
+		}
+	}
+	return %filepairs;
+}
+
+
+sub parse_barcodefiles {
+	my ($inpaths, $cols) = @_;
+
+	my @column_spec = split /,/, $cols; #read in column specification
+	my $ncols = scalar @column_spec;
+	die "Error: Must specify three or four columns" unless($ncols==3 || $ncols==4);
+	my %tags;
+	foreach my $bc_table (@$inpaths){
+
+		open my $bc_read, '<', $bc_table or die "Error: Couldn't read $bc_table";
+
+		while(my $row = <$bc_read>){
+			chomp $row;
+			$row =~ s/["'\r ]//g; #remove any quotation marks, spaces or DOS line endings
+			my @line = split /[\t,]+/, $row; #split row of table by tabs and/or commas
+			my $sampleid;
+			my $well;
+
+			if($ncols == 4){ #if four columns specified, assuming 4th specification is well column as requested in usage
+				$well = $line[$column_spec[3]-1]; #set well as the 4th[specified column
+				$sampleid = "$line[$column_spec[0]-1]_$well";
+			} else {
+				$sampleid = $line[$column_spec[0]-1];
+				if($sampleid =~ /(?:^|[^a-zA-Z\d])([A-H])(\d{1,2})(?:$|[^a-zA-Z\d])/){ #search first-specified column (i.e. sample name) for anything matching a well
+					my $n = $2+0; #strip leading zeros by using second extract (column) in a mathematical operation (add 0)
+					$well = $1.$n; #set well
+					$sampleid = $line[$column_spec[0]-1];
+				} else {
+					die "Well ID could not be parsed from $sampleid in $bc_table" ;
+				}
+			}
+
+		$tags{$well}{$sampleid}[0] = $line[$column_spec[1]-1];
+		$tags{$well}{$sampleid}[1] = $line[$column_spec[2]-1];
+		}
+		
+		close $bc_read;
+	}
+	
+	return %tags;
+}
+
+
+
+sub parse_cutlog {
+	my ($clog,$cuntag) = @_;
+	my %sublog;
+	
+	#untagged data
+	$clog =~ /processed:\s*([\d,]*)\n.*adapters:\s*([\d,]*)\s/g;
+	my $ntot = $1;
+	my $nadapt = $2;
+	$ntot =~ s/,//g;
+	$nadapt =~ s/,//g;
+	my $nuntagged = $ntot - $nadapt;
+	
+	$sublog{$cuntag}{n_tagged_reads_found} = $nuntagged;
+	
+	#tagged data
+	while ($clog =~ /Adapter\s(\S+)\s.*?Trimmed:\s(\d+)\s/sg){
+		$sublog{$1}{n_tagged_reads_found}=$2;
+	}
+	
+	return \%sublog;
+}
+
+sub read_and_remove_fq{
+	my ($sname,$suffix) = @_;
+	my %seq;
+	my $id;
+	my $file = "$outpath$sname\_$suffix.fq";
+	open my $fq, '<', $file or die "Error reading $file\n";
+	while(my $row = <$fq>){
+		chomp $row;
+		if($row =~ /^@(\S+)(?:\s+)(\S+)/){
+			$id = $1;
+			$seq{$id}{name} = $row;
+		} else {
+			$seq{$id}{data} .= "\n$row";
+		}
+	}
+	close $fq;
+	unlink $file or warn "Could not remove $file\n";
+	#print Dumper \%seq;
+	return \%seq;
+}
+
+sub writefq{
+	my ($sname,$suffix,$seq,$writeids) = @_;
+	open my $fq, '>', "$outpath$sname\_$suffix.fq" or die "Error overwriting demuxed files\n";
+	foreach my $id (sort @$writeids){
+		print $fq "${$seq}{$id}{name}${$seq}{$id}{data}\n";
+		}
+	close $fq;
+}

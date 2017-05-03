@@ -1,0 +1,252 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use List::Util qw(all max); 
+use Algorithm::Loops qw(NestedLoops);
+
+use Data::Dumper;
+
+
+my $version = "0.1.1"; #14/03/2017
+
+my $help;
+my $outpath;
+my $for_length;
+my $rev_length;
+my %parameters;
+my $mode = "run";
+my $itsx;
+my $verbose;
+
+my $script = basename($0,());
+
+########################################################
+# USAGE
+#
+my $usage =<<USAGE;
+
+Description:
+
+	This is $script version $version of the NGS Amplicon Pipeline. It takes in a pair or set of paired files, such as those output from NAPdemux, and carries out a sequence of processes by calling external programs:
+		# Primer trimming - removes specified number of bases from F and R reads
+		# Merging - combining overlapping read pairs
+		# Filtering - removing poor quality reads 
+		# ITSx filtering - searching for fungal sequences (OPTIONAL)
+		# Read naming - adding the sample name to every read for future clustering and mapping
+	The script can run with each parameter specified with a single value, in which case it outputs a fasta for each pair of fastq files, or if parameter ranges are specified it will loop through every combination of all parameters and output a log table with the results
+
+Usage:
+
+	Default mode
+	$script -o <dir> -f <n> -r <n> -p <n> -e <n> [-itsx <path/to/HMMs>] [-v] <inputfqs>
+	
+	Evaluation mode
+	$script -o <dir> -f <n> -r <n> -p <n-n,n> -e <n-n,n> --mode eval [-itsx <path/to/HMMs>] [-v] <inputfqs>
+
+Arguments:
+
+	       outpath:  Path to a directory in which output files and the log table are written.
+	forwardprimerl:  Number of bases to trim from the forward reads.
+	reverseprimerl:  Number of bases to trim from the reverse reads.
+	   pearquality:  A value or range to pass to PEAR as a -q option.
+	         eemax:  A value or range to pass to USEARCH70 fastq_filter as a -fastq_maxee option
+	          mode:  One of "run" or "eval", see above. Default "run".
+	          itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
+	       verbose:  Reports on progress.
+	          help:  Prints out this helpful message.
+
+USAGE
+#
+######################################################
+
+GetOptions("outpath=s"		=> \$outpath,
+	   "forwardprimerl=s"	=> \$for_length,
+	   "reverseprimerl=s"	=> \$rev_length,
+	   "pearquality=s"	=> \$parameters{pearquality},
+	   "eemax=s"		=> \$parameters{eemax},
+	   "mode=s"		=> \$mode,
+	   "itsx=s"		=> \$itsx,
+	   "verbose"		=> \$verbose,
+	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
+
+
+print "$usage\n" and exit if($help);
+
+die "I need some files to work on, see \"$script --help\" for more information\n" if(scalar @ARGV == 0);
+
+my @files=@ARGV;
+
+die "Error: please specify --pearquality and --eemax parameters: both are required for either mode, see \"$script --help\" for more information\n" if(!defined $parameters{pearquality} || !defined $parameters{eemax});
+
+
+if(!defined $outpath){
+	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
+} else {
+	make_path($outpath);
+}
+
+
+my $iterations = parse_parameters($mode,\%parameters);
+
+my %paired_files = find_pairs(@files);
+
+my $n_file_pairs = keys %paired_files;
+
+#Create temporary directories
+
+make_path("$outpath/trim","$outpath/merge","$outpath/filter");
+
+#Add 1 to primer lengths so that fastx_trimmer starts at correct base
+$for_length = $for_length+1;
+$rev_length = $rev_length+1;
+
+
+#Set up CSV report
+
+open my $log, '>', "$outpath/merge.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
+
+my @header = ('readname' , 'iteration' , 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted');
+print $log join(',', @header), "\n";
+
+my $i_name;
+my @n_name = sort keys %paired_files;
+my @n_iter = sort keys %$iterations;
+
+foreach my $name (@n_name){ 
+	$i_name++;
+	printf "File pair $i_name/%d: $name\n",$#n_name+1;
+	print "Trimming files\n" if($verbose);
+	
+	my $ftcmd="fastx_trimmer -f $for_length -i $paired_files{$name}[0] -o $outpath/trim/$name\_R1.fq";
+	my $rtcmd="fastx_trimmer -f $rev_length -i $paired_files{$name}[1] -o $outpath/trim/$name\_R2.fq"; 
+	
+	
+	system($ftcmd);
+	system($rtcmd); 
+	
+	my $i_iter;
+	foreach my $iter (@n_iter){
+		$i_iter++;
+		printf "Parameter iteration $i_iter/%d\n",$#n_iter+1 if($mode eq "eval");
+		
+		print "Running PEAR using q-value of ${$iterations}{$iter}{pearquality} \n" if($verbose);
+		print $log "$name,$iter,${$iterations}{$iter}{pearquality}";
+				
+		my $pear_cmd = "pear -f $outpath/trim/$name\_R1.fq -r $outpath/trim/$name\_R2.fq -o $outpath/merge/$name -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
+		
+		my $asmbl_log=`$pear_cmd`;	#Run PEAR on trimmed read pair, saving terminal output to pear_log variable
+
+		$asmbl_log=~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s; #regex to extract data from pear_log
+		
+		my @pear_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
+				foreach my $e (@pear_parse){
+			$e =~ s/,//g;
+			print $log ",$e";
+		}
+		
+		print "Filtering using USEARCH 70 with maximum expected e value of ${$iterations}{$iter}{eemax}\n" if($verbose);
+		
+		print $log ",${$iterations}{$iter}{eemax}";
+		
+		my $filter_cmd = "usearch70 -fastq_filter $outpath/merge/$name.assembled.fastq -fastaout $outpath/filter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
+		
+		my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
+		
+		$filter_log=~ /.*\s(\d*)\s\sFASTQ.*\s(\d*)\s\sLow.*\s(\d*)\s\sConverted.*/s; #regex to extract data
+		my @fqfilter_parse = ($1,$2,$3);
+		foreach my $e (@fqfilter_parse){
+			$e =~ s/,//g;
+			print $log ",$e";
+		}
+		
+		print $log "\n";
+		
+	}
+	my $last = "filter";
+	
+	if(defined $itsx && $mode eq "run"){
+		print "Running ITSx \n" if($verbose);
+		make_path("$outpath/itsx");
+		my $itsx_cmd = "ITSx -i $outpath/filter/$name.fa -o $outpath/itsx/$name.fa -t F -p $itsx --preserve T --cpu 3";
+		system("$itsx_cmd");
+		my $last = "itsx";
+	}
+	
+	if ($mode eq "run"){
+		print "Renaming reads \n" if($verbose);
+		my $readlabelcmd="sed \"-es/^>\\(.*\\)/>\\1;barcodelabel=$name;/\" < $outpath/$last/$name.fa > $outpath/$name.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
+		system($readlabelcmd);
+	}
+}
+
+close $log;
+print "CSV log of read processing written \n" if($verbose);
+
+remove_tree("$outpath/trim","$outpath/merge","$outpath/filter");
+remove_tree("$outpath/itsx") if (defined $itsx && $mode eq "run");
+
+
+
+exit;
+
+#Create a hash of iterations, each of which is a hash of parameters and their values for that iteration
+sub parse_parameters {
+	my ($inmode, $inparams) = @_;
+	my @itarray;
+	my @paramarray;
+	my $n_singleparams;
+	foreach my $param (keys %$inparams){
+	push @paramarray, $param;
+		if($inmode eq "run"){
+			die "Input parameters not single numbers, did you mean to use \"--mode eval\"?\n" unless all { $_ =~ /^\d+(\.\d+)?$/ } values %$inparams;
+			push @itarray, [$inparams->{$param}];
+		} elsif ($inmode eq "eval"){
+			if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
+				my @values;
+				my $curmax = $1;
+				while ($curmax <= $3){
+					push @values, $curmax;
+					$curmax += $5;
+				}
+				push @itarray, \@values;
+			} elsif($inparams->{$param}  =~ /^\d+(\.\d+)?$/){
+				push @itarray, [$inparams->{$param}];
+				$n_singleparams++;
+				die "No parameter ranges given, did you mean to use \"--mode run\"?\n" if($n_singleparams == scalar keys %$inparams);
+			}else {
+				die "Could not successfully parse string given for $param\n";
+			}
+		} else {
+			die "Argument passed to --mode not recognised, see \"$script --help\" for more information\n"
+		}
+	}
+	
+	my @allarray;
+	
+	NestedLoops(\@itarray, sub {push @allarray, [ @_ ]});
+	
+	my %iterhash;
+	foreach my $it (0 .. $#allarray){
+		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
+	}
+	return \%iterhash;
+}
+
+
+sub find_pairs {
+	my @allfiles = @_;
+	my %filepairs;
+	foreach my $file (@allfiles){
+	    my ($file_name,$dir)=fileparse($file);
+	    if($file_name =~ /(.+)_R([1|2])/){
+		$filepairs{$1}[$2-1]=$file;
+	    }else{
+		warn "Input file $file does not contain '_R1' or '_R2' in name: $file";
+	    }
+	}
+	return %filepairs;
+}
