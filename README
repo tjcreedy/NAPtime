@@ -1,0 +1,8 @@
+Welcome to VLS, the repository for bioinformatics Scripts in the Vogler Lab.
+
+Please try to keep scripts well commented and with a help file.
+
+As a general rule, quick-and-dirty scripts are not executable and more polished programs are. 
+To find out what is executable, run ls -alh on this directory. Files with an x in the fourth part of the permissions string and a green filename are executable.
+
+To run executable scripts without having to specify the full file path or being in this directory, you can use the script AddWDtoPATH that can be found in this folder. Note that this script works on whatever directory you are currently cd'd to, so you must be in /dd/vls in order for it to work on this folder.
