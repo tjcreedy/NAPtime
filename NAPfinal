@@ -70,7 +70,6 @@ my @files=@ARGV;
 #print Dumper \%parameters;
 
 my %paramdefaults = (
-	'minlength'		=> 0,
 	'nest'			=> 0,
 	'minsize'		=> 2,
 	'cluster_method'	=> 'usearch',
@@ -104,6 +103,8 @@ if($function eq "select"){
 } else {
 	die "Error: function not recognised, it must be specified, see \"$script --help\" for more information\n";
 }
+
+die "Error: minlength must be specified\n" unless(exists %parameters{minlength});
 
 #print Dumper \%parameters;
 
@@ -498,7 +499,7 @@ sub group {
 	my $minlength_discarded = 0;
 	foreach my $i (0 .. $#ids){
 		my $start = -1;
-		if(length($fa->{$ids[$i]}) < ${$specs}{minlength}){
+		if(length($fa->{$ids[$i]}) <= ${$specs}{minlength}){
 			$minlength_discarded++;
 		} else {
 			foreach my $j (0 .. $#group_ids){ 
