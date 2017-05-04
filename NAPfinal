@@ -104,7 +104,7 @@ if($function eq "select"){
 	die "Error: function not recognised, it must be specified, see \"$script --help\" for more information\n";
 }
 
-die "Error: minlength must be specified\n" unless(exists %parameters{minlength});
+die "Error: minlength must be specified\n" unless(exists $parameters{minlength});
 
 #print Dumper \%parameters;
 
