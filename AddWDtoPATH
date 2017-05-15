@@ -1,0 +1,18 @@
+#!/bin/bash
+
+#Add the path of this folder to the user's .bashrc file
+cmd='export set PATH=$PATH:'"\"$PWD\""
+
+if grep -q "$cmd" ~/.bashrc; then
+	if [[ "$PATH" == *"$PWD"* ]]; then
+		echo "Folder path already added to PATH, should be working"
+	else
+		echo "Folder path not yet propagated to PATH, try restarting your session"
+	fi 
+else
+	echo $cmd >> ~/.bashrc
+	echo "Folder path added, should now propagate to PATH"
+fi
+
+#Reload the profile to include this in the path
+source ~/.bashrc
