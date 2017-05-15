@@ -7,11 +7,12 @@ use File::Basename;
 use File::Path qw(make_path remove_tree);
 use List::Util qw(all max); 
 use Algorithm::Loops qw(NestedLoops);
+use Parallel::ForkManager;
 
 use Data::Dumper;
 
 
-my $version = "0.1.2"; #15/05/2017
+my $version = "0.2.0"; #15/05/2017
 
 my $help;
 my $outpath;
@@ -20,6 +21,7 @@ my $rev_length;
 my %parameters;
 my $mode = "run";
 my $verbose;
+my $threads = 1;
 
 my $script = basename($0,());
 
@@ -41,10 +43,10 @@ Description:
 Usage:
 
 	Default mode
-	$script -o <dir> -f <n> -r <n> -p <n> -e <n> [-itsx <path/to/HMMs>] [-v] <inputfqs>
+	$script -o <dir> -f <n> -r <n> -p <n> -e <n> [-itsx <path/to/HMMs>] [-t <n>] [-v] <inputfqs>
 	
 	Evaluation mode
-	$script -o <dir> -f <n> -r <n> -p <n-n,n> -e <n-n,n> --mode eval [-itsx <path/to/HMMs>] [-v] <inputfqs>
+	$script -o <dir> -f <n> -r <n> -p <n-n,n> -e <n-n,n> --mode eval [-itsx <path/to/HMMs>] [-t <n>] [-v] <inputfqs>
 
 Arguments:
 
@@ -55,6 +57,7 @@ Arguments:
 	         eemax:  A value or range to pass to USEARCH70 fastq_filter as a -fastq_maxee option
 	          mode:  One of "run" or "eval", see above. Default "run".
 	          itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
+	       threads:  Number of CPU threads to use. Default 1.
 	       verbose:  Reports on progress.
 	          help:  Prints out this helpful message.
 
@@ -69,6 +72,7 @@ GetOptions("outpath=s"		=> \$outpath,
 	   "eemax=s"		=> \$parameters{eemax},
 	   "mode=s"		=> \$mode,
 	   "itsx=s"		=> \$parameters{itsx},
+	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
@@ -91,8 +95,8 @@ if(!defined $outpath){
 my %paired_files = find_pairs(@files);
 my $n_file_pairs = keys %paired_files;
 
-# Create temporary directories
-make_path("$outpath/trim","$outpath/merge","$outpath/filter");
+# Create temporary directory
+make_path("$outpath/trim");
 
 # Set up CSV report
 my %report;
@@ -105,13 +109,35 @@ my $iterations = parse_parameters($mode,\%parameters,sort keys %paired_files);
 $for_length = $for_length+1;
 $rev_length = $rev_length+1;
 
-trim(%paired_files,$for_length,$rev_length,$outpath);
+trim(\%paired_files,$for_length,$rev_length,$outpath);
+print "\n";
 
 # Run merging
+my $pm = Parallel::ForkManager->new($threads);
+
+my $done_iterations=0;
+
+$pm->run_on_finish( sub {
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	$done_iterations++;
+	printf "Completed $done_iterations/%d iterations\r", scalar keys %$iterations if $verbose;
+	my $iteration = $data_structure_reference->{iteration};
+	$report{$iteration} = $data_structure_reference->{result};
+});
+
+printf "Starting %d merging and filtering iterations using $threads threads\n", scalar keys %$iterations if $verbose;
+
 foreach my $iter (sort keys %$iterations){
-	printf "Merging and filtering iteration $iter/%d: ${$iterations}{$iter}{name}\r", scalar keys %$iterations if $verbose;
-	$report{$iter} = merge_iteration($iterations,$iter,$outpath,$mode);
+	my $pid = $pm->start and next;
+	
+	my $out = merge_iteration($iterations,$iter,$outpath,$mode);
+	
+	$pm->finish(0, {result => $out, iteration => $iter});
 }
+
+$pm->wait_all_children;
+print "\n";
+remove_tree("$outpath/trim");
 
 open my $log, '>', "$outpath/merge.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
 
@@ -147,15 +173,14 @@ sub trim {
 
 sub merge_iteration {
 	my ($iterations,$iter,$outpath,$mode) = @_;
-	#printf "Parameter iteration $iter/%d\n",$#n_iter+1 if($mode eq "eval");
 	
-	#print "Running PEAR using q-value of ${$iterations}{$iter}{pearquality} \n" if($verbose);
+	make_path("$outpath/merge_$iter","$outpath/filter_$iter");
+	
 	my $log  = "${$iterations}{$iter}{name},$iter,${$iterations}{$iter}{pearquality}";
 	
-	my $pear_cmd = "pear -f $outpath/trim/${$iterations}{$iter}{name}\_R1.fq -r $outpath/trim/${$iterations}{$iter}{name}\_R2.fq -o $outpath/merge/${$iterations}{$iter}{name} -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
+	my $pear_cmd = "pear -f $outpath/trim/${$iterations}{$iter}{name}\_R1.fq -r $outpath/trim/${$iterations}{$iter}{name}\_R2.fq -o $outpath/merge_$iter/${$iterations}{$iter}{name} -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
 	
 	my $asmbl_log=`$pear_cmd`;
-	#Run PEAR on trimmed read pair, saving terminal output to pear_log variable
 	$asmbl_log=~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s; #regex to extract data from pear_log
 	
 	my @pear_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
@@ -164,11 +189,9 @@ sub merge_iteration {
 		$log .= ",$e";
 	}
 	
-	#print "Filtering using USEARCH 70 with maximum expected e value of ${$iterations}{$iter}{eemax}\n" if($verbose);
-	
 	$log .= ",${$iterations}{$iter}{eemax}";
 	
-	my $filter_cmd = "usearch70 -fastq_filter $outpath/merge/${$iterations}{$iter}{name}.assembled.fastq -fastaout $outpath/filter/${$iterations}{$iter}{name}.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
+	my $filter_cmd = "usearch70 -fastq_filter $outpath/merge_$iter/${$iterations}{$iter}{name}.assembled.fastq -fastaout $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
 	
 	my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
 	
@@ -181,25 +204,23 @@ sub merge_iteration {
 	
 	$log .= "\n";
 	
-	my $last = "filter";
+	my $last = "filter_$iter";
 	
 	if(defined ${$iterations}{$iter}{itsx}){
 		print "Running ITSx \n" if($verbose);
-		make_path("$outpath/itsx");
-		my $itsx_cmd = "ITSx -i $outpath/filter/${$iterations}{$iter}{name}.fa -o $outpath/itsx/${$iterations}{$iter}{name}.fa -t F -p ${$iterations}{$iter}{itsx} --preserve T --cpu 3";
+		make_path("$outpath/itsx_$iter");
+		my $itsx_cmd = "ITSx -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $outpath/itsx/${$iterations}{$iter}{name}.fa -t F -p ${$iterations}{$iter}{itsx} --preserve T --cpu 3";
 		system("$itsx_cmd");
-		$last = "itsx";
+		$last = "itsx_$iter";
 	}
 	
 	my $suffix = $mode eq "run" ? "" : "_iteration$iter";
 	
-	#print "Renaming reads \n" if($verbose);
 	my $readlabelcmd="sed \"-es/^>\\(.*\\)/>\\1;barcodelabel=${$iterations}{$iter}{name};/\" < $outpath/$last/${$iterations}{$iter}{name}.fa > $outpath/${$iterations}{$iter}{name}$suffix.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
 	system($readlabelcmd);
 	
-	remove_tree("$outpath/trim","$outpath/merge","$outpath/filter");
-	remove_tree("$outpath/itsx") if (defined ${$iterations}{$iter}{itsx});
-	
+	remove_tree("$outpath/merge_$iter","$outpath/filter_$iter");
+	remove_tree("$outpath/itsx_$iter") if (defined ${$iterations}{$iter}{itsx});
 	return $log;
 }
 
@@ -210,10 +231,10 @@ sub parse_parameters {
 	my $n_singleparams;
 	push @paramarray, "name";
 	push @itarray, \@names;
+	die "Input parameters not single numbers, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^\d+(\.\d+)?$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
-	push @paramarray, $param;
-		if($inmode eq "run"){
-			die "Input parameters not single numbers, did you mean to use \"--mode eval\"?\n" unless all { $_ =~ /^\d+(\.\d+)?$/ } values %$inparams;
+		push @paramarray, $param;
+		if($inmode eq "run" or $param eq "itsx"){
 			push @itarray, [$inparams->{$param}];
 		} elsif ($inmode eq "eval"){
 			if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
