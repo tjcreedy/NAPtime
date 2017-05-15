@@ -11,7 +11,7 @@ use Algorithm::Loops qw(NestedLoops);
 use Data::Dumper;
 
 
-my $version = "0.1.1"; #14/03/2017
+my $version = "0.1.2"; #15/05/2017
 
 my $help;
 my $outpath;
@@ -19,7 +19,6 @@ my $for_length;
 my $rev_length;
 my %parameters;
 my $mode = "run";
-my $itsx;
 my $verbose;
 
 my $script = basename($0,());
@@ -69,7 +68,7 @@ GetOptions("outpath=s"		=> \$outpath,
 	   "pearquality=s"	=> \$parameters{pearquality},
 	   "eemax=s"		=> \$parameters{eemax},
 	   "mode=s"		=> \$mode,
-	   "itsx=s"		=> \$itsx,
+	   "itsx=s"		=> \$parameters{itsx},
 	   "verbose"		=> \$verbose,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
@@ -89,116 +88,128 @@ if(!defined $outpath){
 	make_path($outpath);
 }
 
-
-my $iterations = parse_parameters($mode,\%parameters);
-
 my %paired_files = find_pairs(@files);
-
 my $n_file_pairs = keys %paired_files;
 
-#Create temporary directories
-
+# Create temporary directories
 make_path("$outpath/trim","$outpath/merge","$outpath/filter");
 
-#Add 1 to primer lengths so that fastx_trimmer starts at correct base
+# Set up CSV report
+my %report;
+
+# Set up iterations
+my $iterations = parse_parameters($mode,\%parameters,sort keys %paired_files);
+
+# Run trimming
+	#Add 1 to primer lengths so that fastx_trimmer starts at correct base
 $for_length = $for_length+1;
 $rev_length = $rev_length+1;
 
+trim(%paired_files,$for_length,$rev_length,$outpath);
 
-#Set up CSV report
+# Run merging
+foreach my $iter (sort keys %$iterations){
+	printf "Merging and filtering iteration $iter/%d: ${$iterations}{$iter}{name}\r", scalar keys %$iterations if $verbose;
+	$report{$iter} = merge_iteration($iterations,$iter,$outpath,$mode);
+}
 
 open my $log, '>', "$outpath/merge.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
 
-my @header = ('readname' , 'iteration' , 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted');
-print $log join(',', @header), "\n";
+print $log join(',',('readname' , 'iteration' , 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted', "\n"));
 
-my $i_name;
-my @n_name = sort keys %paired_files;
-my @n_iter = sort keys %$iterations;
-
-foreach my $name (@n_name){ 
-	$i_name++;
-	printf "File pair $i_name/%d: $name\n",$#n_name+1;
-	print "Trimming files\n" if($verbose);
-	
-	my $ftcmd="fastx_trimmer -f $for_length -i $paired_files{$name}[0] -o $outpath/trim/$name\_R1.fq";
-	my $rtcmd="fastx_trimmer -f $rev_length -i $paired_files{$name}[1] -o $outpath/trim/$name\_R2.fq"; 
-	
-	
-	system($ftcmd);
-	system($rtcmd); 
-	
-	my $i_iter;
-	foreach my $iter (@n_iter){
-		$i_iter++;
-		printf "Parameter iteration $i_iter/%d\n",$#n_iter+1 if($mode eq "eval");
-		
-		print "Running PEAR using q-value of ${$iterations}{$iter}{pearquality} \n" if($verbose);
-		print $log "$name,$iter,${$iterations}{$iter}{pearquality}";
-				
-		my $pear_cmd = "pear -f $outpath/trim/$name\_R1.fq -r $outpath/trim/$name\_R2.fq -o $outpath/merge/$name -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
-		
-		my $asmbl_log=`$pear_cmd`;	#Run PEAR on trimmed read pair, saving terminal output to pear_log variable
-
-		$asmbl_log=~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s; #regex to extract data from pear_log
-		
-		my @pear_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
-				foreach my $e (@pear_parse){
-			$e =~ s/,//g;
-			print $log ",$e";
-		}
-		
-		print "Filtering using USEARCH 70 with maximum expected e value of ${$iterations}{$iter}{eemax}\n" if($verbose);
-		
-		print $log ",${$iterations}{$iter}{eemax}";
-		
-		my $filter_cmd = "usearch70 -fastq_filter $outpath/merge/$name.assembled.fastq -fastaout $outpath/filter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
-		
-		my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
-		
-		$filter_log=~ /.*\s(\d*)\s\sFASTQ.*\s(\d*)\s\sLow.*\s(\d*)\s\sConverted.*/s; #regex to extract data
-		my @fqfilter_parse = ($1,$2,$3);
-		foreach my $e (@fqfilter_parse){
-			$e =~ s/,//g;
-			print $log ",$e";
-		}
-		
-		print $log "\n";
-		
-	}
-	my $last = "filter";
-	
-	if(defined $itsx && $mode eq "run"){
-		print "Running ITSx \n" if($verbose);
-		make_path("$outpath/itsx");
-		my $itsx_cmd = "ITSx -i $outpath/filter/$name.fa -o $outpath/itsx/$name.fa -t F -p $itsx --preserve T --cpu 3";
-		system("$itsx_cmd");
-		my $last = "itsx";
-	}
-	
-	if ($mode eq "run"){
-		print "Renaming reads \n" if($verbose);
-		my $readlabelcmd="sed \"-es/^>\\(.*\\)/>\\1;barcodelabel=$name;/\" < $outpath/$last/$name.fa > $outpath/$name.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
-		system($readlabelcmd);
-	}
+foreach my $i (sort keys %report){
+	print $log $report{$i};
 }
 
 close $log;
+
 print "CSV log of read processing written \n" if($verbose);
-
-remove_tree("$outpath/trim","$outpath/merge","$outpath/filter");
-remove_tree("$outpath/itsx") if (defined $itsx && $mode eq "run");
-
 
 
 exit;
 
 #Create a hash of iterations, each of which is a hash of parameters and their values for that iteration
+
+sub trim {
+	my ($pairs,$for,$rev,$outpath) = @_;
+	my $i_name;
+	foreach my $name (sort keys %$pairs){ 
+		$i_name++;
+		printf "Trimming file pair $i_name/%d: $name\r",scalar keys %$pairs if($verbose);
+		
+		my $ftcmd="fastx_trimmer -f $for_length -i $paired_files{$name}[0] -o $outpath/trim/$name\_R1.fq";
+		my $rtcmd="fastx_trimmer -f $rev_length -i $paired_files{$name}[1] -o $outpath/trim/$name\_R2.fq"; 
+		
+		system($ftcmd);
+		system($rtcmd);
+	}
+}
+
+sub merge_iteration {
+	my ($iterations,$iter,$outpath,$mode) = @_;
+	#printf "Parameter iteration $iter/%d\n",$#n_iter+1 if($mode eq "eval");
+	
+	#print "Running PEAR using q-value of ${$iterations}{$iter}{pearquality} \n" if($verbose);
+	my $log  = "${$iterations}{$iter}{name},$iter,${$iterations}{$iter}{pearquality}";
+	
+	my $pear_cmd = "pear -f $outpath/trim/${$iterations}{$iter}{name}\_R1.fq -r $outpath/trim/${$iterations}{$iter}{name}\_R2.fq -o $outpath/merge/${$iterations}{$iter}{name} -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
+	
+	my $asmbl_log=`$pear_cmd`;
+	#Run PEAR on trimmed read pair, saving terminal output to pear_log variable
+	$asmbl_log=~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s; #regex to extract data from pear_log
+	
+	my @pear_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
+	foreach my $e (@pear_parse){
+		$e =~ s/,//g;
+		$log .= ",$e";
+	}
+	
+	#print "Filtering using USEARCH 70 with maximum expected e value of ${$iterations}{$iter}{eemax}\n" if($verbose);
+	
+	$log .= ",${$iterations}{$iter}{eemax}";
+	
+	my $filter_cmd = "usearch70 -fastq_filter $outpath/merge/${$iterations}{$iter}{name}.assembled.fastq -fastaout $outpath/filter/${$iterations}{$iter}{name}.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
+	
+	my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
+	
+	$filter_log=~ /.*\s(\d*)\s\sFASTQ.*\s(\d*)\s\sLow.*\s(\d*)\s\sConverted.*/s; #regex to extract data
+	my @fqfilter_parse = ($1,$2,$3);
+	foreach my $e (@fqfilter_parse){
+		$e =~ s/,//g;
+		$log .= ",$e";
+	}
+	
+	$log .= "\n";
+	
+	my $last = "filter";
+	
+	if(defined ${$iterations}{$iter}{itsx}){
+		print "Running ITSx \n" if($verbose);
+		make_path("$outpath/itsx");
+		my $itsx_cmd = "ITSx -i $outpath/filter/${$iterations}{$iter}{name}.fa -o $outpath/itsx/${$iterations}{$iter}{name}.fa -t F -p ${$iterations}{$iter}{itsx} --preserve T --cpu 3";
+		system("$itsx_cmd");
+		$last = "itsx";
+	}
+	
+	my $suffix = $mode eq "run" ? "" : "_iteration$iter";
+	
+	#print "Renaming reads \n" if($verbose);
+	my $readlabelcmd="sed \"-es/^>\\(.*\\)/>\\1;barcodelabel=${$iterations}{$iter}{name};/\" < $outpath/$last/${$iterations}{$iter}{name}.fa > $outpath/${$iterations}{$iter}{name}$suffix.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
+	system($readlabelcmd);
+	
+	remove_tree("$outpath/trim","$outpath/merge","$outpath/filter");
+	remove_tree("$outpath/itsx") if (defined ${$iterations}{$iter}{itsx});
+	
+	return $log;
+}
+
 sub parse_parameters {
-	my ($inmode, $inparams) = @_;
+	my ($inmode, $inparams,@names) = @_;
 	my @itarray;
 	my @paramarray;
 	my $n_singleparams;
+	push @paramarray, "name";
+	push @itarray, \@names;
 	foreach my $param (keys %$inparams){
 	push @paramarray, $param;
 		if($inmode eq "run"){
