@@ -11,11 +11,12 @@ use Algorithm::Loops qw(NestedLoops);
 use POSIX;
 use LWP::Simple;
 use Parallel::ForkManager;
+use Sys::Hostname;
 
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.3.0"; #16/5/17
+my $version = "0.3.1"; #16/5/17
 
 my $help;
 my $outpath;
@@ -24,7 +25,8 @@ my $function;
 my $mode;
 my $display = "groups";
 my $threads = 1;
-my $verbose;
+our $blastpath;
+our $verbose;
 
 my $script = basename($0,());
 
@@ -60,6 +62,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "identitypc=s"	=> \$parameters{identity},
 	   "display=s"		=> \$display,
 	   "threads=i"		=> \$threads,
+	   "blastpath=s"	=> \$blastpath,
 	   "verbose"		=> \$verbose,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
@@ -123,6 +126,28 @@ if(!defined $outpath){
 }
 
 #
+# Check for blast database and arrange threads
+#
+if(!$blastpath){
+	my $host = hostname;
+	my %paths = (
+		'ctag' => '/dh/blastdb/nt',
+		'hpc-watson' => '/db/blastdb/nt'
+	);
+	if(exists($paths{$host})){
+		$blastpath = $paths{$host};
+	} else {
+		die "Error: no path to BLAST database found, please give me one using --blastpath <path>\n";
+	}
+}
+my $blastthreads = 1;
+if($mode eq "stat"){
+	$blastthreads = $threads;
+} elsif(scalar @files < $threads){
+	$blastthreads = floor($threads /scalar @files);
+}
+
+#
 # Set up parameter iterations
 #
 my $iterations = parse_parameters($mode,\%parameters);
@@ -148,29 +173,14 @@ my %log;
 my %stats = (
 	shared  => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups_discarded_<minsize','n_groups_remain'],
 	group   => ['mean_groupsize','stdev_groupsize','min_groupsize','max_groupsize','max_groupsize_pc'],
-	filter  => ['filteroutcome','groupselected','bootstrap_pvalue','blastscore','n_groups_pooled','selected_rank','pooled_size'],
+	filter  => ['filteroutcome','groupselected','bootstrap_pvalue','n_groups_pooled','selected_rank','pooled_size'],
 	cluster => ['cluster_input_seqs','n_otus','n_unique_otu_member_seqs','n_chimeras','min_otu_length','mean_otu_length','max_otu_length']
 );
 
 my $allfasta;
-my $log;
+
 my $logline;
 if ($function eq "cluster"){
-	print "Reading and concatenating all files\n" if $verbose;
-	my $allfasta = read_and_concatenate(@files);
-	die "Error, no sequences in any input fasta" if(scalar keys %$allfasta<1);
-	#
-	# Write all sequences for later mapping
-	#
-	my $allfa = "$outpath/cluster.allreads.fa";
-	open my $allout, '>', $allfa or die "Error writing to $allfa\n";
-	foreach my $id (keys %$allfasta){
-		print $allout ">$id\n${$allfasta}{$id}\n";
-	}
-	close $allout;
-	
-	print "Concatenated reads written to  to $outpath/cluster.allreads.fa\n" if $verbose;
-	
 	my $pm = Parallel::ForkManager->new($threads);
 	my $done_iterations=0;
 
@@ -191,7 +201,7 @@ if ($function eq "cluster"){
 		$logline++;
 		my $out = group_sort_and_cluster($allfasta,$allfa,$iterations,$iter,\%params,\%stats,$threads>1 ? $pid : "");
 		
-		$pm->finish(0, {result => $out, logline => $logline});
+		$pm->finish(0, {result => $out, line => $logline});
 	}
 	
 	$pm->wait_all_children;
@@ -199,8 +209,8 @@ if ($function eq "cluster"){
 } elsif($function eq "select"){
 	if($mode eq "stat"){
 		print "\nProcessing sample\n" if $verbose;
-		$log = read_group_and_filter($files[0],$iterations,1,\%params,\%stats);
-		histograms_and_output($log,$disp_stat,$outpath);
+		$log{1} = read_group_and_filter($files[0],$iterations,1,$blastthreads,\%params,\%stats);
+		histograms_and_output($log{1},$disp_stat,$outpath);
 	} elsif($mode eq "batch" or $mode eq "eval"){
 		
 		my $pm = Parallel::ForkManager->new($threads);
@@ -220,9 +230,9 @@ if ($function eq "cluster"){
 				my $pid = $pm->start and next;
 			
 				$logline++;
-				my $out = read_group_and_filter($file,$iterations,$iter,\%params,\%stats);
+				my $out = read_group_and_filter($file,$iterations,$iter,$blastthreads,\%params,\%stats);
 			
-				$pm->finish(0, {result => $out, logline => $logline});
+				$pm->finish(0, {result => $out, line => $logline});
 			}
 		}
 		
@@ -237,7 +247,7 @@ if ($function eq "cluster"){
 
 if($function eq 'select' and $mode eq 'batch' and $verbose){
 	my $filtersuccesses;
-	map { $filtersuccesses++ if ${$log}{$_}{filteroutcome} eq "passed" } keys %$log;
+	map { $filtersuccesses++ if $log{$_}{filteroutcome} eq "passed" } keys %log;
 	printf "$script successfully selected sequences for $filtersuccesses of %d files with given filtering parameters, see log for details\n",scalar keys @files ;
 }
 
@@ -274,22 +284,11 @@ print "Fasta of selected sequences successfully written to $outpath/$function.se
 exit;
 
 sub read_and_concatenate{
-	my @files = @_;
-	my %allfasta;
-	foreach my $file (@files){
-		my %fasta = read_fasta($file);
-		my ($name,$dir)=fileparse($file);
-		$name =~ s/^(.+)\.[^.]+$/$1/;
-	
-		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
-		
-		@allfasta{keys %fasta} = values %fasta;
-	}
-	return \%allfasta;
+
 }
 
 sub read_group_and_filter{
-	my ($file,$iterations,$iter,$params,$stats) = @_;
+	my ($file,$iterations,$iter,$blastthreads,$params,$stats) = @_;
 	
 	my %log;
 	
@@ -326,16 +325,18 @@ sub read_group_and_filter{
 	#Filtering
 	#
 	printf "Filtering %d groups\n", $ngroup if $verbose;
-	my $filterresult = filter_groups($groups,${$iterations}{$iter},$stats{filter},$verbose);
+	
+	my $filterresult = filter_groups($groups,${$iterations}{$iter},$stats{filter},$blastthreads);
+	
 	warn "Warning, BLAST failed 5 times when filtering groups for $file" if exists(${$filterresult}{blastwarning});
 	
 	#
 	# Do logging
 	#
-	@log{@{$stats}{group}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
-	@log{@{$stats}{shared}} = ($name, scalar keys %fasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
-	@log{@{$stats}{filter}} = @{$filterresult}{@{$stats}{filter}};
-	@log{@{$params}{shared},@{$params}{select}} = @{${$iterations}{$iter}}{@{$params}{shared},@{$params}{select}};
+	@log{@{${$stats}{group}}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
+	@log{@{${$stats}{shared}}} = ($name, scalar keys %fasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
+	@log{@{${$stats}{filter}}} = @{$filterresult}{@{${$stats}{filter}}};
+	@log{@{${$params}{shared}},@{${$params}{select}}} = @{${$iterations}{$iter}}{@{${$params}{shared}},@{${$params}{select}}};
 	
 	#
 	# Take actions if filtering successful
@@ -358,18 +359,51 @@ sub read_group_and_filter{
 sub group_sort_and_cluster{
 	my ($allfasta,$allfa,$iterations,$iter,$params,$stats,$pid) = @_;
 	my %log;
-	$pid = "$pid/" unless $pid eq "";
 	
-#	printf "\nClustering iteration $iter of %d\n",$#n_iter+1 if $verbose;
+	printf "\nClustering iteration $iter of %d\n",scalar keys %$iterations if $verbose;
+	
+	print "Reading and concatenating all files\n" if $verbose;
+	my %allfasta;
+	foreach my $file (@files){
+		my %fasta = read_fasta($file);
+		my ($name,$dir)=fileparse($file);
+		$name =~ s/^(.+)\.[^.]+$/$1/;
+	
+		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
+		
+		@allfasta{keys %fasta} = values %fasta;
+	}
+	die "Error, no sequences in any input fasta" if(scalar keys %$allfasta<1);
+	#
+	# Write all sequences greater than minlength for later mapping
+	#
+	my $minlength_discarded
+	my $allfa = "$outpath/cluster.allreads_iteration$iter.fa";
+	open my $allout, '>', $allfa or die "Error writing to $allfa\n";
+	foreach my $id (keys %$allfasta){
+		if(length(${$allfasta}{$id})>=${$iterations}{$iter}{minlength}){
+			print $allout ">$id\n${$allfasta}{$id}\n";
+		} else {
+			$minlength_discarded++;
+		}
+	}
+	close $allout;
+	
+	print "Concatenated reads written to $outpath/$pid\cluster.allreads.fa\n" if $verbose;
 	
 	#
 	# Group all sequences
 	#
-#	print "Dereplicating all sequences longer than ${$iterations}{$iter}{minlength}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
-	my ($groups,$minlength_discarded,$minsize_discarded) = group($allfasta,${$iterations}{$iter});
+	print "Dereplicating all sequences longer than ${$iterations}{$iter}{minlength}bp\n" if $verbose;
+	my $derep_seqs = "$outpath/temp/cluster.derep_iteration$iter.fa";
+	my $derep_cmd = "usearch80 -derep_fulllength $allout -fastaout $derep_seqs -sizeout 2>&1";
+	my $derep_log = `$derep_cmd`;
+	$derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s
+	my ($inputseqs,$ngroup,$singletons,$minsize_discarded,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
 	
 	#
-	# Sort by size
+	# Sort by size TODO: replace this with running usearch sortbysize with minlength, and parse  |usearch80 -sortbysize mbtrials.unique.fa -fastaout mbtrials.size.fa -minsize 2|
+
 	#
 	my @gids = keys %$groups;
 	my %groupsort;
@@ -380,10 +414,10 @@ sub group_sort_and_cluster{
 	my @stat_sorted = sort { $b <=> $a } values %groupsort;
 	my @gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
 	
-#	printf "$minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long, %d sequences dereplicated into %d groups\n", sum(@stat_sorted), $#gids+1 if $verbose;
+	printf "$minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long, %d sequences dereplicated into %d groups\n", sum(@stat_sorted), $#gids+1 if $verbose;
 	
 	#
-	# Output fasta for clustering
+	# Output fasta for clustering TODO: replace this with running sed to replace size marker if swarm
 	#
 	my $temppath ="$outpath/$pid\cluster.$iter.temp.fa";
 	my $outfmt;
@@ -402,14 +436,14 @@ sub group_sort_and_cluster{
 	}
 	close $ds_out;
 	
-#	printf "Temporary fasta of %d groups written for clustering after $minsize_discarded discarded for having fewer than ${$iterations}{$iter}{minsize} members\n", $#gids+1-$minsize_discarded if $verbose;
+	printf "Temporary fasta of %d groups written for clustering after $minsize_discarded discarded for having fewer than ${$iterations}{$iter}{minsize} members\n", $#gids+1-$minsize_discarded if $verbose;
 	
 	#
 	# Do logging
 	#
-	@log{@{$stats}{group}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
-	@log{@{$stats}{shared}} = ("Dereplicated concatenated samples", scalar keys %$allfasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
-	@log{@{$params}{shared},@{$params}{cluster}} = @{${$iterations}{$iter}}{@{$params}{shared},@{$params}{cluster}};
+	@log{@{${$stats}{group}}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
+	@log{@{${$stats}{shared}}} = ("Dereplicated concatenated samples", scalar keys %$allfasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
+	@log{@{${$params}{shared}},@{${$params}{cluster}}} = @{${$iterations}{$iter}}{@{${$params}{shared}},@{${$params}{cluster}}};
 	
 	#
 	# Perform clustering
@@ -430,7 +464,7 @@ sub group_sort_and_cluster{
 	
 	}
 	
-#	print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, ${$log{$iter}}{'n_otus'} otus found, fasta written to $otuspath\n" if $verbose;
+	print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, ${$log{$iter}}{'n_otus'} otus found, fasta written to $otuspath\n" if $verbose;
 	
 	#
 	# Map OTUs
@@ -449,14 +483,14 @@ sub group_sort_and_cluster{
 	# Final logging and output
 	#
 #	print "Reads successfully mapped to OTUs, table written to $mappath\n" if $verbose;
-	@log{@{$stats}{cluster}} = (@clusterstat,@mapstat);
+	@log{@{${$stats}{cluster}}} = (@clusterstat,@mapstat);
 	return \%log;
 }
 
 
 sub histograms_and_output{
 	my ($log,$disp_stat,$outpath) = @_;
-	my $groups = $log{groups};
+	my $groups = ${$log}{groups};
 	my @gids = keys %$groups;
 	
 	if(@gids){
@@ -494,9 +528,9 @@ sub histograms_and_output{
 		#
 		# Write to group log and fasta
 		#
-		my $name = $log{filename};
+		my $name = ${$log}{filename};
 		print "Writing group sequences to fasta and details to log\n" if $verbose;
-		print "$outpath/$name.stat.groups.log.csv\n";
+#		print "$outpath/$name.stat.groups.log.csv\n";
 		open my $glog,'>',"$outpath/$name.stat.groups.log.csv" or die "Error, couldn't open csv for writing group log\n";
 		open my $gfa_out, '>', "$outpath/$name.stat.groups.fa" or die "Error, couldn't open fa for writing\n";
 	
@@ -585,12 +619,14 @@ sub read_fasta {
 sub group {
 	my ($fa,$specs) = @_;
 #Sort all sequences in the fasta by length, so the sequence that initialises a group will always be the longest
+	print "sorting sequences by size\n";
 	my @ids = sort { length($fa->{$b}) <=> length($fa->{$a}) } keys %$fa;
-	
+	printf "%d sequences\n",scalar @ids;
 	my %fa_grouped;
 	my @group_ids;
 	my $group_id;
 	my $minlength_discarded = 0;
+	print "start grouping\n";
 	foreach my $i (0 .. $#ids){
 		my $start = -1;
 		if(length($fa->{$ids[$i]}) <= ${$specs}{minlength}){
@@ -613,13 +649,16 @@ sub group {
 				push @group_ids, $group_id;
 			}
 		}
+	printf "processed %d/%d sequences, currently at %d groups\r",$i+1,scalar @ids,$group_id+1;
 	}
 	my $minsize_discarded = 0;
+	print "Removing groups that are too small...";
 	if(${$specs}{minsize}>1){
 		foreach my $g (keys %fa_grouped){
 			delete $fa_grouped{$g} and $minsize_discarded++ if($fa_grouped{$g}{size}<${$specs}{minsize});
 		}
 	}
+	print "$minsize_discarded removed\n";
 	return(\%fa_grouped,$minlength_discarded,$minsize_discarded);
 }
 
@@ -656,7 +695,7 @@ sub add_group {
 }
 
 sub filter_groups{
-	my ($groups,$specs,$loghead,$verbose) = @_;
+	my ($groups,$specs,$loghead,$blastthreads) = @_;
 	
 	my @gids = keys %$groups;
 	my %groupsort;
@@ -677,7 +716,7 @@ sub filter_groups{
 		printf "\nAssessing group $gselection%s\n",$groupspooled>0 ? "(pool of $groupspooled)":"" if $verbose;
 		if (!@stat_sorted){
 			print "No sequences passed grouping parameters, entire sample discarded\n";
-			@log{@$loghead} = ('nosequences',("NA") x 5,0);
+			@log{@$loghead} = ('nosequences',("NA") x 4,0);
 			last;
 		}
 		
@@ -686,14 +725,13 @@ sub filter_groups{
 		
 		print "Bootstrap value $pvalue against ${$specs}{pvalue} (max ${$specs}{pvalue_maxthreshold})\n" if $verbose;
 		
-		my $blastscore = "NA";
 		if($pvalue >= ${$specs}{pvalue_maxthreshold}){
-			@log{@$loghead} = ('exceeded_max_pvalue','NA',$pvalue,"NA",$groupspooled,$gselection,$stat_sorted[0]);
+			@log{@$loghead} = ('exceeded_max_pvalue','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
 			print "Group $gselection exceeded maximum pvalue, entire sample discarded\n" if $verbose;
 			last;
 		}elsif($pvalue <= ${$specs}{pvalue}){
 			#2. BLAST
-			my @blastbestguess = taxonomyblast(($groups->{$gids_sorted[0]}{seq}),$specs);
+			my @blastbestguess = taxonomyblast(($groups->{$gids_sorted[0]}{seq}),$specs,$blastthreads);
 			my %blast;
 			if(!@blastbestguess){
 				$log{blastwarning} = 1;
@@ -701,7 +739,7 @@ sub filter_groups{
 				%blast = map { $_ => 1} @blastbestguess;
 			}
 			if(exists($blast{${$specs}{blasttarget}})){
-				@log{@$loghead} = ('passed',$gids_sorted[0],$pvalue,$blastscore,$groupspooled,$gselection,$stat_sorted[0]);
+				@log{@$loghead} = ('passed',$gids_sorted[0],$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
 				print "Group $gselection passed filter, done\n" if $verbose;
 				last;
 			}
@@ -709,7 +747,7 @@ sub filter_groups{
 		
 		if($#gids_sorted == 0){
 			print "Group $gselection not sufficiently distinct or similar to target taxon. No further groups exist, entire sample discarded\n" if $verbose;
-			@log{@$loghead} = ('groups_exhausted','NA',$pvalue,$blastscore,$groupspooled,$gselection,$stat_sorted[0]);
+			@log{@$loghead} = ('groups_exhausted','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
 			last;
 		}
 		
@@ -745,7 +783,7 @@ sub bootstrap{
 	my $ngroups = $#values+1;
 	my $nseqs = sum(@values);
 	
-	#print "Running $boots bootstraps placing $nseqs sequences randomly into $ngroups groups to find probability of group with $max members\n";
+	print "Running $boots bootstraps placing $nseqs sequences randomly into $ngroups groups to find probability of group with $max members\n";
 	
 	my $nsuccesses = 0;
 	foreach (1..$boots) {
@@ -758,13 +796,11 @@ sub bootstrap{
 }
 
 sub taxonomyblast{
-	my ($seq,$parameters) = @_;
+	my ($seq,$parameters,$blastthreads) = @_;
 	print "Blasting\n" if $verbose;
+	my $blastcmd = "blastn -query <(echo -e \">sample\\n$seq\") -db $blastpath -num_threads $blastthreads -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 sacc bitscore\"";
 	my $blastdump;
-	my $blastcmd = "blastn -query <(echo -e \">sample\\n@seq\") -db /dh/blastdb/nt -num_threads 1 -max_target_seqs ${$parameters}{nhits} -outfmt \"6 sacc bitscore\"";
-	
 	my $blasttries = 0;
-	my $blastdump;
 	while(!$blastdump && $blasttries<5){
 		$blastdump = qx(bash -c '$blastcmd');
 		$blasttries++;
@@ -774,10 +810,10 @@ sub taxonomyblast{
 		print "Retrieving taxonomy information\n" if $verbose;
 		my @accessions = ($blastdump =~ /(?:^|\n)(\w+)/g);
 		my $accessionstring = join ",",@accessions;
-		print $accessionstring,"\n";
+#		print $accessionstring,"\n";
 		my $nucdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta");
 		my $taxidstring = join ",",($nucdump =~ /<TSeq_taxid>(.*)<\/TSeq_taxid/g);
-		print $taxidstring,"\n";
+#		print $taxidstring,"\n";
 		my $taxdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
 		my @lineages = ($taxdump =~ /<Lineage>(.*)<\/Lineage>/g);
 		my @linaoa;
