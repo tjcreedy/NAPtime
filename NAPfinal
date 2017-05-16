@@ -86,11 +86,11 @@ my %paramdefaults = (
 );
 
 #print Dumper \%paramdefaults;
-my %params = {
+my %params = (
 	'shared' => ['minlength','nest','minsize'],
 	'select' => ['bootstraps', 'blasthits','blasttarget','pvalue','blastthreshold','pvalue_maxthreshold','identity'],
 	'cluster' => ['cluster_method','otuassignpc'],
-};
+);
 
 if($function eq "select"){
 	$mode = "stat" unless(defined $mode);
@@ -101,7 +101,7 @@ if($function eq "select"){
 	print "Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n" if($mode eq "batch" and scalar @files < 2);
 } elsif($function eq "cluster"){
 	$mode = "batch" unless(defined $mode);
-	die "Error: selection parameter(s) specified while in \"cluster\" function\n" if(any {defined $_} @parameters{@{$params{shared}}});
+	die "Error: selection parameter(s) specified while in \"cluster\" function\n" if(any {defined $_} @parameters{@{$params{select}}});
 	delete @parameters{@{$params{select}}};
 	@parameters{@{$params{shared}},@{$params{cluster}}} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@{$params{shared}},@{$params{cluster}});
 } else {
@@ -145,17 +145,18 @@ if ($mode eq "stat"){
 
 my %log;
 
-my %stats = {
+my %stats = (
 	shared  => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups_discarded_<minsize','n_groups_remain'],
 	group   => ['mean_groupsize','stdev_groupsize','min_groupsize','max_groupsize','max_groupsize_pc'],
 	filter  => ['filteroutcome','groupselected','bootstrap_pvalue','blastscore','n_groups_pooled','selected_rank','pooled_size'],
 	cluster => ['cluster_input_seqs','n_otus','n_unique_otu_member_seqs','n_chimeras','min_otu_length','mean_otu_length','max_otu_length']
-};
+);
 
 my $allfasta;
 my $log;
 my $logline;
 if ($function eq "cluster"){
+	print "Reading and concatenating all files\n" if $verbose;
 	my $allfasta = read_and_concatenate(@files);
 	die "Error, no sequences in any input fasta" if(scalar keys %$allfasta<1);
 	#
@@ -176,12 +177,13 @@ if ($function eq "cluster"){
 	$pm->run_on_finish( sub {
 		my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 		$done_iterations++;
-		printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1)*($#files+1) if $verbose;
+		printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1) if $verbose and $mode eq 'eval';
 		my $line = $data_structure_reference->{line};
 		$log{$line} = $data_structure_reference->{result};
 	});
 	
-	printf "Starting %d clustering iterations using $threads threads\n", ($#n_iter+1)*($#files+1) if $verbose;
+	print "Starting clustering\n" if $verbose and $mode eq "batch";
+	printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+1) if $verbose and $mode eq "eval";
 
 	foreach my $iter (@n_iter){;
 		my $pid = $pm->start and next;
@@ -278,7 +280,7 @@ sub read_and_concatenate{
 		my ($name,$dir)=fileparse($file);
 		$name =~ s/^(.+)\.[^.]+$/$1/;
 	
-		warn "Warning: file $name is empty!\n" if(scalar keys %fasta < 1);
+		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
 		
 		@allfasta{keys %fasta} = values %fasta;
 	}
@@ -522,7 +524,7 @@ sub parse_parameters {
 	my @itarray;
 	my @paramarray;
 	my $n_singleparams;
-	die "Input parameters not single numbers, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^\d+(\.\d+)?$/ } values %$inparams;
+	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-]*$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
 		push @paramarray, $param;
 		if($inmode eq "stat" or $inmode eq "batch"){
@@ -536,11 +538,14 @@ sub parse_parameters {
 					$curmax += $5;
 				}
 				push @itarray, \@values;
-			} elsif($inparams->{$param}  =~ /^\d+(\.\d+)?$/){
+			} elsif($inparams->{$param} =~ /^[a-zA-Z]+(?:,[a-zA-Z]+)+$/){
+				my @values = split ',',$inparams->{$param};
+				push @itarray, \@values;
+			} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
 				push @itarray, [$inparams->{$param}];
 				$n_singleparams++;
 				die "No parameter ranges given, did you mean to use \"--mode run\"?\n" if($n_singleparams == scalar keys %$inparams);
-			}else {
+			} else {
 				die "Could not successfully parse string given for $param\n";
 			}
 		} else {
