@@ -10,6 +10,7 @@ use List::MoreUtils qw(pairwise);
 use Algorithm::Loops qw(NestedLoops);
 use POSIX;
 use LWP::Simple;
+use Parallel::ForkManager;
 
 ####Dev####
 use Data::Dumper;
@@ -22,6 +23,7 @@ my %parameters;
 my $function;
 my $mode;
 my $display = "groups";
+my $threads = 1;
 my $verbose;
 
 my $script = basename($0,());
@@ -57,6 +59,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "threshold_pvalue"	=> \$parameters{pvalue_maxthreshold},
 	   "identitypc=s"	=> \$parameters{identity},
 	   "display=s"		=> \$display,
+	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
@@ -83,23 +86,24 @@ my %paramdefaults = (
 );
 
 #print Dumper \%paramdefaults;
-
-my @sharedparams = ('minlength','nest','minsize');
-my @selectparams = ('bootstraps', 'blasthits','blasttarget','pvalue','blastthreshold','pvalue_maxthreshold','identity');
-my @clusterparams = ('cluster_method','otuassignpc');
+my %params = {
+	'shared' => ['minlength','nest','minsize'],
+	'select' => ['bootstraps', 'blasthits','blasttarget','pvalue','blastthreshold','pvalue_maxthreshold','identity'],
+	'cluster' => ['cluster_method','otuassignpc'],
+};
 
 if($function eq "select"){
 	$mode = "stat" unless(defined $mode);
-	die "Error: clustering parameter(s) specified while in \"select\" function\n" if(any {defined $_} @parameters{@clusterparams});
-	delete @parameters{@clusterparams};
+	die "Error: clustering parameter(s) specified while in \"select\" function\n" if(any {defined $_} @parameters{@{$params{cluster}}});
+	delete @parameters{@{$params{cluster}}};
 	die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
-	@parameters{@sharedparams,@selectparams} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@sharedparams,@selectparams);
+	@parameters{@{$params{shared}},@{$params{select}}} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@{$params{shared}},@{$params{select}});
 	print "Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n" if($mode eq "batch" and scalar @files < 2);
 } elsif($function eq "cluster"){
 	$mode = "batch" unless(defined $mode);
-	die "Error: selection parameter(s) specified while in \"cluster\" function\n" if(any {defined $_} @parameters{@selectparams});
-	delete @parameters{@selectparams};
-	@parameters{@sharedparams,@clusterparams} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@sharedparams,@clusterparams);
+	die "Error: selection parameter(s) specified while in \"cluster\" function\n" if(any {defined $_} @parameters{@{$params{shared}}});
+	delete @parameters{@{$params{select}}};
+	@parameters{@{$params{shared}},@{$params{cluster}}} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@{$params{shared}},@{$params{cluster}});
 } else {
 	die "Error: function not recognised, it must be specified, see \"$script --help\" for more information\n";
 }
@@ -138,190 +142,95 @@ if ($mode eq "stat"){
 	}
 } # OTHER ERROR CATCHES?
 
-my $fa_out;
+
 my %log;
 
-my @sharedstats = ('filename','sequences','iteration','n_seq_discarded_<minlength','n_groups_discarded_<minsize','n_groups_remain');
-my @groupstats = ('mean_groupsize','stdev_groupsize','min_groupsize','max_groupsize','max_groupsize_pc');
-my @filterstats = ('filteroutcome','groupselected','bootstrap_pvalue','blastscore','n_groups_pooled','selected_rank','pooled_size');
-my @clusterstats;
+my %stats = {
+	shared  => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups_discarded_<minsize','n_groups_remain'],
+	group   => ['mean_groupsize','stdev_groupsize','min_groupsize','max_groupsize','max_groupsize_pc'],
+	filter  => ['filteroutcome','groupselected','bootstrap_pvalue','blastscore','n_groups_pooled','selected_rank','pooled_size'],
+	cluster => ['iteration','total_sequences','nesting','n_groups','minlength','n_sequences_ge_minlength','minsize','n_groups<minsize_discarded',
+			'cluster_method','otu_radius_pct','cluster_input_seqs','n_otus','n_unique_otu_member_seqs','n_chimeras','min_otu_length','mean_otu_length','max_otu_length']
+};
 
-#	'cluster'=>	['iteration','total_sequences','nesting','n_groups','minlength','n_sequences_ge_minlength','minsize','n_groups<minsize_discarded',
-#			'cluster_method','otu_radius_pct','cluster_input_seqs','n_otus','n_unique_otu_member_seqs','n_chimeras','min_otu_length','mean_otu_length','max_otu_length'],
-
-my %allfasta;
-my $i_file;
+my $allfasta;
+my $log;
 my $logline;
-my $filtersuccesses = 0;
-foreach my $filepath (@files){
-	$i_file++;
-	
-	my %fasta = read_fasta($filepath);
-	my ($name,$dir)=fileparse($filepath);
-	$name =~ s/^(.+)\.[^.]+$/$1/;
-	
-	warn "Warning: file $name is empty!\n" if(scalar keys %fasta < 1);
-	
-	if($function eq "cluster"){
-		print "Concatenating $name to master fasta before clustering\n" if $verbose;
-		@allfasta{keys %fasta} = values %fasta;
+if ($function eq "cluster"){
+	my $allfasta = read_and_concatenate(@files) 
+} elsif($function eq "select"){
+	if($mode eq "stat"){
+		$log = read_group_and_filter($files[0],$iterations,1,\%params,\%stats);
+		histograms_and_output($log,$disp_stat,$outpath);
+	} elsif($mode eq "batch" or $mode eq "eval"){
 		
-	}elsif ($function eq "select"){
-		printf "\nProcessing file $i_file of %d: $name\n", $#files+1 if($verbose and $#files>0);
-		my $i_iter;
-		foreach my $iter (@n_iter){;
-			$i_iter++;
-			$logline++;
-			printf "\nParameter iteration $i_iter of %d for $name\n", $#n_iter+1 if($verbose and $#n_iter>0);
-			
-			#
-			# Grouping function
-			#
-			
-			print "Grouping all sequences longer than ${$iterations}{$iter}{minlength}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
-			my ($groups,$minlength_discarded,$minsize_discarded) = group(\%fasta,${$iterations}{$iter});
-			my @gids = keys %$groups;
-			
-			#
-			# Sort groups by size, removing those smaller than minsize
-			#
-			
-			my %groupsort;
-			foreach my $g (@gids){
-				$groupsort{$g} = $groups->{$g}{size};
-			}
-			my ($ngroup,$topsize,$totseq) = @gids ? (scalar keys %groupsort,max(values %groupsort),sum(values %groupsort)) : (0,0,0);
-			printf "%d sequences grouped after $minlength_discarded discarded for being less than ${$iterations}{$iter}{minlength}bp long. $minsize_discarded groups discarded for having fewer than ${$iterations}{$iter}{minsize} sequences, %d groups remain containing %d sequences\n", @gids ? scalar keys %fasta : 0, $ngroup, $totseq if($verbose or $mode eq 'stat');
-			
-			#
-			#Filtering
-			#
-			
-			printf "Filtering %d groups\n", $ngroup if $verbose;
-			
-			my $filterresult = filter_groups(\%groupsort,$groups,${$iterations}{$iter},\@filterstats,$verbose);
-			
-			#
-			# Do logging
-			#
-			
-			@{$log{$logline}}{@groupstats} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
-			
-			@{$log{$logline}}{@sharedstats} = ($name, scalar keys %fasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
-			
-			@{$log{$logline}}{@filterstats} = @{$filterresult}{@filterstats};
-			
-			@{$log{$logline}}{@sharedparams,@selectparams} = @{${$iterations}{$iter}}{@sharedparams,@selectparams};
-			
-			#
-			# Take actions if filtering successful
-			#
-			
-			if (${$filterresult}{filteroutcome} eq 'passed'){
-				print "Candidate sequence selected, see log for details\n" if $verbose;
-				${$log{$logline}}{sequence} = $groups->{${$log{$logline}}{groupselected}}{seq};
-				$filtersuccesses++;
-			} else {
-				print "No candidate sequence could be selected, see log for details\n" if $verbose;
-				${$log{$logline}}{sequence} = "-";
-			}
-			
-			
-			#
-			# Display histograms for stat mode
-			#
-			
-			my (@stat_sorted,@gids_sorted);
-			
-			if($mode eq "stat" && @gids){
-				if($disp_stat eq "maxlength"){
-					foreach my $g (@gids){
-						$groupsort{$g} = ${$groups}{$g}{maxlength} if($groups->{$g}{size} >= ${$iterations}{$iter}{minsize});
-					}
-					
-					@stat_sorted = sort { $b <=> $a } values %groupsort;
-					@gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
-				} else {
-					@stat_sorted = sort { $b <=> $a } values %groupsort;
-					@gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
-				}
-				if($display eq "groups"){
-					print "Histogram of $disp_stat values for all groups\n";
-					histogram (\@stat_sorted,10);
-				} else {
-					print "Histogram of sequence lengths within group $gids_sorted[$disp_n-1] with rank $disp_n $disp_stat value $stat_sorted[$disp_n-1]\n";
-					histogram(\@{${$groups}{$gids_sorted[$disp_n-1]}{lengths}},10);
-					print "Histogram of base frequencies by position within group $gids_sorted[$disp_n-1] with rank $disp_n $disp_stat value $stat_sorted[$disp_n-1]\n";
-					histogram(\@{${$groups}{$gids_sorted[$disp_n-1]}{basefreq}},10);
-					my @matches =  map { $stat_sorted[$disp_n-1] == $_ ? 1 : 0 } @stat_sorted;
-					warn "Warning: groups of other rank have the same $disp_stat value, make sure to check a rank above and below $disp_stat if appropriate\n" if(sum(@matches)>1);
-				}
-			}
-			
-			#
-			# Write to group log and fasta for stat mode
-			#
-			
-			if($mode eq "stat" && @gids){
-				print "Writing group sequences to fasta and details to log\n" if $verbose;
-				print "$outpath/$name.$function.groups.log.csv\n";
-				open my $glog,'>',"$outpath/$name.$function.groups.log.csv" or die "Error, couldn't open csv for writing group log\n";
-				open my $gfa_out, '>', "$outpath/$name.$function.groups.fa" or die "Error, couldn't open fa for writing\n";
-				
-				print $glog "group,n_sequences,min_length,max_length,mean_length,stdev_length\n";
-				foreach my $gi (0..$#gids_sorted){
-					print $glog "$gids_sorted[$gi],$stat_sorted[$gi],";
-					my @out_lengths = @{${$groups}{$gids_sorted[$gi]}{lengths}};
-					print $glog min(@out_lengths),",";
-					print $glog max(@out_lengths),",";
-					print $glog sum(@out_lengths)/@out_lengths,",";
-					print $glog stdev(@out_lengths),"\n";
-				
-					print $gfa_out ">$gids_sorted[$gi];size=$stat_sorted[$gi]\n";
-					print $gfa_out "${$groups}{$gids_sorted[$gi]}{seq}\n";
-				}
-				
-				close $gfa_out;
-				close $glog;
-				
-			} elsif($mode eq "stat" && !@gids){
-				print "No sequences found for $name greater than ${$iterations}{$iter}{minlength}bp, no files will be written\n";
-			}
-		} # end iterations within function eq select
-	} # end if function eq select
-} # end file loop
+		my $pm = Parallel::ForkManager->new($threads);
+		my $done_iterations=0;
 
-print "$script successfully selected sequences for $filtersuccesses of $i_file files with given filtering parameters, see log for details\n" if($function eq 'select' and $mode eq 'batch' and $verbose);
+		$pm->run_on_finish( sub {
+			my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+			$done_iterations++;
+			printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1)*($#files+1) if $verbose;
+			my $line = $data_structure_reference->{line};
+			$log{$line} = $data_structure_reference->{result};
+		});
+		
+		printf "Starting %d filtering iterations using $threads threads\n", ($#n_iter+1)*($#files+1) if $verbose;
+		foreach my $file (@files){
+			foreach my $iter (@n_iter){;
+				my $pid = $pm->start and next;
+			
+				$logline++;
+				my $out = read_group_and_filter($file,$iterations,$iter,\%params,\%stats);
+			
+				$pm->finish(0, {result => $out, logline => $logline});
+			}
+		}
+		
+		$pm->wait_all_children;
+		print "\n";
+	} else {
+		die "Mode not recognised\n";
+	}
+} else {
+	die "Function not recognised\n";
+}
+
+if($function eq 'select' and $mode eq 'batch' and $verbose){
+	my $filtersuccesses;
+	map { $filtersuccesses++ if ${$log}{$_}{filteroutcome} eq "passed" } keys %$log;
+	printf "$script successfully selected sequences for $filtersuccesses of %d files with given filtering parameters, see log for details\n",scalar keys @files ;
+}
 
 if($function eq "cluster"){
-	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
+	die "Error, no sequences in any input fasta" if(scalar keys %$allfasta<1);
 	
 	#
 	# Write all sequences for later mapping
 	#
 	my $allfa = "$outpath/cluster.allreads.fa";
 	open my $allout, '>', $allfa or die "Error writing to $allfa\n";
-	foreach my $id (keys %allfasta){
-		print $allout ">$id\n$allfasta{$id}\n";
+	foreach my $id (keys %$allfasta){
+		print $allout ">$id\n${$allfasta}{$id}\n";
 	}
 	close $allout;
 	
 	print "Concatenated reads written to  to $outpath/cluster.allreads.fa\n" if $verbose;
 	
-	my $i_iter;
+	my $iter;
 	foreach my $iter (@n_iter){
-		$i_iter++;
-		$logline++;
+		$iter++;
+		$iter++;
 		
-		@{$log{$logline}}{'iteration','total_sequences'} = ($iter,scalar keys %allfasta);
+		@{$log{$iter}}{'iteration','total_sequences'} = ($iter,scalar keys %$allfasta);
 		
-		printf "\nClustering iteration $i_iter of %d\n",$#n_iter+1 if $verbose;
+		printf "\nClustering iteration $iter of %d\n",$#n_iter+1 if $verbose;
 		
 		#
 		# Group all sequences
 		#
 		print "Dereplicating all sequences longer than ${$iterations}{$iter}{minlength}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
-		my ($groups,$minlength_discarded,$minsize_discarded) = group(\%allfasta,${$iterations}{$iter});
+		my ($groups,$minlength_discarded,$minsize_discarded) = group($allfasta,${$iterations}{$iter});
 		my @gids = keys %$groups;
 		
 		
@@ -335,7 +244,7 @@ if($function eq "cluster"){
 			my @stat_sorted = sort { $b <=> $a } values %groupsort;
 			my @gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
 		
-		@{$log{$logline}}{'nesting','n_groups','minlength','n_sequences_ge_minlength'} = (${$iterations}{$iter}{nest} ? "true" : "false", $#gids+1,${$iterations}{$iter}{minlength}, sum(@stat_sorted));
+		@{$log{$iter}}{'nesting','n_groups','minlength','n_sequences_ge_minlength'} = (${$iterations}{$iter}{nest} ? "true" : "false", $#gids+1,${$iterations}{$iter}{minlength}, sum(@stat_sorted));
 		
 		printf "$minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long, %d sequences dereplicated into %d groups\n", sum(@stat_sorted), $#gids+1 if $verbose;
 		
@@ -358,7 +267,7 @@ if($function eq "cluster"){
 		}
 		close $ds_out;
 		
-		@{$log{$logline}}{'minsize','n_groups<minsize_discarded'} = (${$iterations}{$iter}{minsize},$minsize_discarded);
+		@{$log{$iter}}{'minsize','n_groups<minsize_discarded'} = (${$iterations}{$iter}{minsize},$minsize_discarded);
 		
 		printf "Temporary fasta of %d groups written for clustering after $minsize_discarded discarded for having fewer than ${$iterations}{$iter}{minsize} members\n", $#gids+1-$minsize_discarded if $verbose;
 		
@@ -375,14 +284,14 @@ if($function eq "cluster"){
 			my $clustercmd = "usearch70 -cluster_otus $temppath -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassignpc} 2>&1 1>/dev/null";
 			my $clusterlog = `$clustercmd`;
 			$clusterlog=~/seqs\s\s(\d*).*OTUs\s\s(\d*).*Members\s\s(\d*).*Chimeras\s\s(\d*)/s; #input sequences, number otus, n_unique_otu_member_seqs, n_chimeras 
-			@{$log{$logline}}{'cluster_method','otu_radius_pct','cluster_input_seqs','n_otus','n_unique_otu_member_seqs','n_chimeras'} = (${$iterations}{$iter}{cluster_method},${$iterations}{$iter}{otuassignpc},$1,$2,$3,$4);
+			@{$log{$iter}}{'cluster_method','otu_radius_pct','cluster_input_seqs','n_otus','n_unique_otu_member_seqs','n_chimeras'} = (${$iterations}{$iter}{cluster_method},${$iterations}{$iter}{otuassignpc},$1,$2,$3,$4);
 		} elsif(${$iterations}{$iter}{cluster_method} = "swarm"){
 		
 		die "Error: swarm not yet implemented\n";
 		
 		}
 		
-		print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, ${$log{$logline}}{'n_otus'} otus found, fasta written to $otuspath\n" if $verbose;
+		print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, ${$log{$iter}}{'n_otus'} otus found, fasta written to $otuspath\n" if $verbose;
 		
 		#
 		# Map OTUs
@@ -393,7 +302,7 @@ if($function eq "cluster"){
 			my $mapcmd = "usearch70 -usearch_global $allfa -db $otuspath -strand plus -id $idpc -uc $outpath/temp.map.uc 2>&1 1>/dev/null";
 			my $maplog=`$mapcmd`;
 			$maplog =~ /min\s(\d*),\savg\s(\d*),\smax\s(\d*)/s;
-			@{$log{$logline}}{'min_otu_length', 'mean_otu_length', 'max_otu_length'} = ($1,$2,$3);
+			@{$log{$iter}}{'min_otu_length', 'mean_otu_length', 'max_otu_length'} = ($1,$2,$3);
 			convert_uc_and_write("$outpath/temp.map.uc",$mappath);
 		}
 		
@@ -404,7 +313,7 @@ if($function eq "cluster"){
 open my $logcsv, '>', "$outpath/$function.$mode.log.csv";
 
 my %head = (
-	'select'=>	[@sharedstats,@sharedparams,@selectparams,@groupstats,@filterstats],
+	'select'=>	[@{$stats{shared}},@{$params{shared}},@{$params{select}},@{$stats{group}},@{$stats{filter}}],
 );
 print $logcsv join(',',@{$head{$function}});
 
@@ -428,30 +337,177 @@ print "Fasta of selected sequences successfully written to $outpath/$function.se
 
 exit;
 
+sub read_and_concatenate{
+	my @files = @_;
+	my %allfasta;
+	foreach my $file (@files){
+		my %fasta = read_fasta($file);
+		my ($name,$dir)=fileparse($file);
+		$name =~ s/^(.+)\.[^.]+$/$1/;
+	
+		warn "Warning: file $name is empty!\n" if(scalar keys %fasta < 1);
+		
+		@allfasta{keys %fasta} = values %fasta;
+	}
+	return \%allfasta;
+}
+
+sub read_group_and_filter{
+	my ($file,$iterations,$iter,$params,$stats) = @_;
+	
+	my %log;
+	
+	#
+	# Read in fasta
+	#
+	my %fasta = read_fasta($file);
+	my ($name,$dir)=fileparse($file);
+	
+	$name =~ s/^(.+)\.[^.]+$/$1/;
+	warn "Warning: file $name is empty!\n" if(scalar keys %fasta < 1);
+	
+	##printf "\nProcessing file $i_file of %d: $name\n", $#files+1 if($verbose and $#files>0);
+	printf "\nParameter iteration $iter of %d for $name\n", $#n_iter+1 if($verbose and $#n_iter>0);
+	
+	#
+	# Grouping function
+	#
+	print "Grouping all sequences longer than ${$iterations}{$iter}{minlength}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
+	my ($groups,$minlength_discarded,$minsize_discarded) = group(\%fasta,${$iterations}{$iter});
+
+	#
+	# Sort groups by size
+	#
+	my @gids = keys %$groups;
+	my %groupsort;
+	foreach my $g (@gids){
+		$groupsort{$g} = $groups->{$g}{size};
+	}
+	my ($ngroup,$topsize,$totseq) = @gids ? (scalar keys %groupsort,max(values %groupsort),sum(values %groupsort)) : (0,0,0);
+	printf "%d sequences grouped after $minlength_discarded discarded for being less than ${$iterations}{$iter}{minlength}bp long. $minsize_discarded groups discarded for having fewer than ${$iterations}{$iter}{minsize} sequences, %d groups remain containing %d sequences\n", @gids ? scalar keys %fasta : 0, $ngroup, $totseq if($verbose or $mode eq 'stat');
+
+	#
+	#Filtering
+	#
+	printf "Filtering %d groups\n", $ngroup if $verbose;
+	my $filterresult = filter_groups($groups,${$iterations}{$iter},$stats{filter},$verbose);
+	
+	#
+	# Do logging
+	#
+	@log{@{$stats}{group}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
+	@log{@{$stats}{shared}} = ($name, scalar keys %fasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
+	@log{@{$stats}{filter}} = @{$filterresult}{@{$stats}{filter}};
+	@log{@{$params}{shared},@{$params}{select}} = @{${$iterations}{$iter}}{@{$params}{shared},@{$params}{select}};
+	
+	#
+	# Take actions if filtering successful
+	#
+	if (${$filterresult}{filteroutcome} eq 'passed'){
+		print "Candidate sequence selected, see log for details\n" if $verbose;
+		$log{sequence} = $groups->{$log{groupselected}}{seq};
+	} else {
+		print "No candidate sequence could be selected, see log for details\n" if $verbose;
+		$log{sequence} = "-";
+	}
+	
+	#
+	# Record groups and return
+	#
+	$log{groups} = $groups;
+	return $log;
+}
+
+sub histograms_and_output{
+	my ($log,$disp_stat,$outpath) = @_;
+	my $groups = $log{groups};
+	my @gids = keys %$groups;
+	
+	if(@gids){
+		my %groupsort;
+		foreach my $g (@gids){
+			$groupsort{$g} = $groups->{$g}{size};
+		}
+		#
+		# Display histograms
+		#
+		my (@stat_sorted,@gids_sorted);
+		if($disp_stat eq "maxlength"){
+			foreach my $g (@gids){
+				$groupsort{$g} = ${$groups}{$g}{maxlength};
+			}
+		
+			@stat_sorted = sort { $b <=> $a } values %groupsort;
+			@gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
+		} else {
+			@stat_sorted = sort { $b <=> $a } values %groupsort;
+			@gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
+		}
+		if($display eq "groups"){
+			print "Histogram of $disp_stat values for all groups\n";
+			histogram (\@stat_sorted,10);
+		} else {
+			print "Histogram of sequence lengths within group $gids_sorted[$disp_n-1] with rank $disp_n $disp_stat value $stat_sorted[$disp_n-1]\n";
+			histogram(\@{${$groups}{$gids_sorted[$disp_n-1]}{lengths}},10);
+			print "Histogram of base frequencies by position within group $gids_sorted[$disp_n-1] with rank $disp_n $disp_stat value $stat_sorted[$disp_n-1]\n";
+			histogram(\@{${$groups}{$gids_sorted[$disp_n-1]}{basefreq}},10);
+			my @matches =  map { $stat_sorted[$disp_n-1] == $_ ? 1 : 0 } @stat_sorted;
+			warn "Warning: groups of other rank have the same $disp_stat value, make sure to check a rank above and below $disp_stat if appropriate\n" if(sum(@matches)>1);
+		}
+	
+		#
+		# Write to group log and fasta
+		#
+		my $name = $log{filename};
+		print "Writing group sequences to fasta and details to log\n" if $verbose;
+		print "$outpath/$name.stat.groups.log.csv\n";
+		open my $glog,'>',"$outpath/$name.stat.groups.log.csv" or die "Error, couldn't open csv for writing group log\n";
+		open my $gfa_out, '>', "$outpath/$name.stat.groups.fa" or die "Error, couldn't open fa for writing\n";
+	
+		print $glog "group,n_sequences,min_length,max_length,mean_length,stdev_length\n";
+		foreach my $gi (0..$#gids_sorted){
+			print $glog "$gids_sorted[$gi],$stat_sorted[$gi],";
+			my @out_lengths = @{${$groups}{$gids_sorted[$gi]}{lengths}};
+			print $glog min(@out_lengths),",";
+			print $glog max(@out_lengths),",";
+			print $glog sum(@out_lengths)/@out_lengths,",";
+			print $glog stdev(@out_lengths),"\n";
+	
+			print $gfa_out ">$gids_sorted[$gi];size=$stat_sorted[$gi]\n";
+			print $gfa_out "${$groups}{$gids_sorted[$gi]}{seq}\n";
+		}
+	
+		close $gfa_out;
+		close $glog;
+	} else {
+		print "No sequences passed filtering, nothing to display\n";
+	}
+}
+
 sub parse_parameters {
 	my ($inmode, $inparams) = @_;
 	my @itarray;
 	my @paramarray;
+	my $n_singleparams;
+	die "Input parameters not single numbers, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^\d+(\.\d+)?$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
 		push @paramarray, $param;
 		if($inmode eq "stat" or $inmode eq "batch"){
-			die "Input parameters don't appear to be single values, did you mean to use \"--mode eval\"?\n" if any { $_ =~ /[,-]/ } values %$inparams;
 			push @itarray, [$inparams->{$param}];
 		} elsif ($inmode eq "eval"){
-			if ($inparams->{$param} =~ /^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)$/ ){
+			if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
 				my @values;
 				my $curmax = $1;
-				while ($curmax <= $2){
+				while ($curmax <= $3){
 					push @values, $curmax;
-					$curmax += $3;
+					$curmax += $5;
 				}
 				push @itarray, \@values;
-			} elsif($inparams->{$param} =~ /^(?:[a-zA-Z]\w+,)+/){
-				my @values = split(',', $inparams->{$param});
-				push @itarray, \@values;
-			} elsif($inparams->{$param} =~ /^\d+(?:\.\d+)?$|^\w+$/){
-				push @itarray, [$inparams->{$param}]; 
-			} else {
+			} elsif($inparams->{$param}  =~ /^\d+(\.\d+)?$/){
+				push @itarray, [$inparams->{$param}];
+				$n_singleparams++;
+				die "No parameter ranges given, did you mean to use \"--mode run\"?\n" if($n_singleparams == scalar keys %$inparams);
+			}else {
 				die "Could not successfully parse string given for $param\n";
 			}
 		} else {
@@ -562,9 +618,16 @@ sub add_group {
 }
 
 sub filter_groups{
-	my ($groupsort,$groups,$specs,$loghead,$verbose) = @_;
-	my @stat_sorted = sort { $b <=> $a } values %$groupsort;
-	my @gids_sorted = sort { $groupsort->{$b} <=> $groupsort->{$a} } keys %$groupsort;
+	my ($groups,$specs,$loghead,$verbose) = @_;
+	
+	my @gids = keys %$groups;
+	my %groupsort;
+	foreach my $g (@gids){
+		$groupsort{$g} = $groups->{$g}{size};
+	}
+	
+	my @stat_sorted = sort { $b <=> $a } values %groupsort;
+	my @gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
 	
 	my %log;
 	

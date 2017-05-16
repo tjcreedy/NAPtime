@@ -139,6 +139,7 @@ $pm->wait_all_children;
 print "\n";
 remove_tree("$outpath/trim");
 
+#Do logging
 open my $log, '>', "$outpath/merge.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
 
 print $log join(',',('readname' , 'iteration' , 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted', "\n"));
