@@ -198,6 +198,7 @@ if ($function eq "cluster"){
 	print "\n";
 } elsif($function eq "select"){
 	if($mode eq "stat"){
+		print "\nProcessing sample\n" if $verbose;
 		$log = read_group_and_filter($files[0],$iterations,1,\%params,\%stats);
 		histograms_and_output($log,$disp_stat,$outpath);
 	} elsif($mode eq "batch" or $mode eq "eval"){
@@ -757,17 +758,16 @@ sub bootstrap{
 }
 
 sub taxonomyblast{
-	my ($seqs,$parameters) = @_;
+	my ($seq,$parameters) = @_;
+	print "Blasting\n" if $verbose;
 	my $blastdump;
-	foreach my $i (0..scalar(@$seqs)-1){
-		printf "BLASTing sequence %d\n", $i+1 if $verbose;
-		my $blastcmd = "blastn -query <(echo -e \">sample\\n@$seqs[$i]\") -db /dh/blastdb/nt -num_threads 1 -max_target_seqs ${$parameters}{nhits} -outfmt \"6 sacc bitscore\"";
-		my $blasttries = 0;
-		my $blastdump;
-		while(!$blastdump && $blasttries<5){
-			$blastdump = qx(bash -c '$blastcmd');
-			$blasttries++;
-		}
+	my $blastcmd = "blastn -query <(echo -e \">sample\\n@seq\") -db /dh/blastdb/nt -num_threads 1 -max_target_seqs ${$parameters}{nhits} -outfmt \"6 sacc bitscore\"";
+	
+	my $blasttries = 0;
+	my $blastdump;
+	while(!$blastdump && $blasttries<5){
+		$blastdump = qx(bash -c '$blastcmd');
+		$blasttries++;
 	}
 	my @out;
 	if($blastdump){
