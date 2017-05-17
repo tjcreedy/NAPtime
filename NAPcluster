@@ -1,0 +1,383 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use List::Util qw(sum all any min max); 
+use List::MoreUtils qw(pairwise);
+use Algorithm::Loops qw(NestedLoops);
+use POSIX;
+use LWP::Simple;
+use Parallel::ForkManager;
+use Sys::Hostname;
+
+####Dev####
+use Data::Dumper;
+
+my $version = "0.3.1"; #16/5/17
+
+my $help;
+my $outpath;
+my %parameters;
+my $mode;
+my $threads = 1;
+our $verbose;
+
+my $script = basename($0,());
+
+########################################################
+# USAGE
+#
+my $usage =<<USAGE;
+
+Description:
+
+	This is $script version $version of the NGS Amplicon Pipeline. It carries out either barcode selection or clustering of one or several fastas. When selecting barcodes, there are three modes: viewing statistics for a single file, running one or several files in batch mode with a set of parameters, or iterating through range(s) of parameter(s) to explore parameter space. Clustering only has the latter two modes.
+	
+	For more details, see the google doc documentation.
+	
+USAGE
+#
+######################################################
+
+GetOptions("output=s"		=> \$outpath,
+	   "mode=s"		=> \$mode,
+	   "minlength=s"	=> \$parameters{minlength},
+	   "cluster_method=s"	=> \$parameters{cluster_method},
+	   "otuassign=s"	=> \$parameters{otuassign},
+	   "minsize=s"		=> \$parameters{minsize},
+	   "threads=i"		=> \$threads,
+	   "verbose"		=> \$verbose,
+	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
+
+
+print "$usage\n" and exit if($help);
+
+die "I need some files to work on, see \"$script --help\" for more information\n" if(scalar @ARGV == 0);
+
+my @files=@ARGV;
+
+#print Dumper \%parameters;
+
+my %paramdefaults = (
+	'nest'			=> 0,
+	'minsize'		=> 2,
+	'cluster_method'	=> 'usearch',
+	'otuassign'		=> 3,
+);
+
+#print Dumper \%paramdefaults;
+my @params = ('minlength','nest','minsize','cluster_method','otuassign');
+
+$mode = "batch" unless(defined $mode);
+delete @parameters{@params};
+@parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
+
+die "Error: minlength must be specified\n" unless(defined $parameters{minlength});
+
+#print Dumper \%parameters;
+
+print "\nParameters parsed successfully, mode is \"$mode\"\n" if $verbose;
+
+if(!defined $outpath){
+	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
+} else {
+	print "Creating output directory if needed\n" if $verbose;
+	make_path($outpath);
+	$outpath =~ s/\/$//;
+}
+
+#
+# Set up parameter iterations
+#
+my $iterations = parse_parameters($mode,\%parameters);
+
+my @n_iter = sort keys %$iterations;
+
+printf "%d iterations successfully parsed\n\n",$#n_iter+1 if($verbose and $#n_iter>0);
+
+
+my %log;
+
+my %stats = (
+	general => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups','n_groups_discarded_<minsize','n_groups_remain'],
+	group   => ['mean_groupsize','min_groupsize','max_groupsize'],
+	cluster => ['n_otus','n_chimeras_uchime','n_chimeras_cluster','min_otu_length','mean_otu_length','max_otu_length']
+);
+
+my $allfasta;
+
+my $logline;
+
+my $pm = Parallel::ForkManager->new($threads);
+my $done_iterations=0;
+
+$pm->run_on_finish( sub {
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	$done_iterations++;
+	printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1) if $verbose and $mode eq 'eval';
+	my $line = $data_structure_reference->{line};
+	$log{$line} = $data_structure_reference->{result};
+});
+
+print "Starting clustering\n" if $verbose and $mode eq "batch";
+printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+1) if $verbose and $mode eq "eval";
+
+foreach my $iter (@n_iter){;
+	my $pid = $pm->start and next;
+	
+	$logline++;
+	my $out = group_sort_and_cluster(\@files,$iterations,$iter,\@params,\%stats,$threads>1 ? $pid : "");
+	
+	$pm->finish(0, {result => $out, line => $logline});
+}
+
+$pm->wait_all_children;
+print "\n";
+
+#
+# Output results log
+#
+
+open my $logcsv, '>', "$outpath/cluster.$mode.log.csv";
+
+my @head = (@{$stats{general}},@params,@{$stats{group}},@{$stats{cluster}});
+
+print $logcsv join(',',@head);
+
+foreach my $i (keys %log){
+	print $logcsv "\n",join(',',@{$log{$i}}{@head});
+}
+
+close $logcsv;
+
+print "\nCleaning temporary files\n" if $verbose;
+system "rm $outpath/*temp*";
+
+print "\nCSV log successfully written to $outpath/cluster.$mode.log.csv\n" if $verbose;
+
+##TODO: implement swarm and associated functions
+
+
+exit;
+
+sub group_sort_and_cluster{
+	my ($files,$iterations,$iter,$params,$stats,$pid) = @_;
+	my %log;
+	
+	printf "\nClustering iteration $iter of %d\n",scalar keys %$iterations if $verbose;
+	
+	print "Reading and concatenating all files\n" if $verbose;
+	my %allfasta;
+	foreach my $file (@$files){
+		my %fasta = read_fasta($file);
+		my ($name,$dir)=fileparse($file);
+		$name =~ s/^(.+)\.[^.]+$/$1/;
+	
+		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
+		
+		@allfasta{keys %fasta} = values %fasta;
+	}
+	die "Error, no sequences in any input fasta" if(scalar keys %$allfasta<1);
+	#
+	# Write all sequences greater than minlength for later mapping
+	#
+	my $minlength_discarded;
+	my $allfa = "$outpath/temp/allreads_iteration$iter.fa";
+	open my $allout, '>', $allfa or die "Error writing to $allfa\n";
+	foreach my $id (keys %$allfasta){
+		if(length(${$allfasta}{$id})>=${$iterations}{$iter}{minlength}){
+			print $allout ">$id\n${$allfasta}{$id}\n";
+		} else {
+			$minlength_discarded++;
+		}
+	}
+	close $allout;
+	
+	print "Concatenated reads written to $outpath/$pid\cluster.allreads.fa\n" if $verbose;
+	
+	#
+	# Group all sequences
+	#
+	print "Dereplicating all sequences longer than ${$iterations}{$iter}{minlength}bp\n" if $verbose;
+	my $derep_seqs = "$outpath/temp/cluster.derep_iteration$iter.fa";
+	my $derep_cmd = "usearch80 -derep_fulllength $allout -fastaout $derep_seqs -sizeout 2>&1";
+	my $derep_log = `$derep_cmd`;
+	$derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+)\s.+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s;
+	my ($inputseqs,$ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5,$6);
+	
+	#
+	# Sort by size 
+	#
+	
+	my $sort_seqs = "$outpath/temp/cluster.derep_iteration$iter.fa";
+	my $sort_cmd = "usearch80 -sortbysize $derep_seqs -fastaout $sort_seqs -minsize ${$iterations}{$iter}{minsize} 2>&1";
+	my $sort_log = `$sort_cmd`;
+	$sort_log =~ /\s(\d+)\ssequences/;
+	my $n_groups_remain = $1;
+	my $minsize_discarded = $ngroup-$n_groups_remain;
+	
+	print "$minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long, $inputseqs sequences dereplicated into $ngroup groups, of which $minsize_discarded discarded for having fewer than ${$iterations}{$iter}{minsize} members: clustering $n_groups_remain unique sequences\n" if $verbose;
+	
+	#
+	# Do logging
+	#
+	@log{@{${$stats}{general}}} = ("Dereplicated concatenated samples", scalar keys %$allfasta, $iter, $minlength_discarded, $ngroup, $minsize_discarded, $n_groups_remain);
+	@log{@{${$stats}{group}}} = ($mean_groupsize,$minsize,$topsize);
+	@log{@$params} = @{${$iterations}{$iter}}{@$params};
+	
+	#
+	# Perform clustering
+	#
+		#prepare paths
+	my $pathroot = "$outpath/temp_$pid/cluster.";
+	$pathroot.= $mode eq 'eval' ? "iteration$iter\_" : "";
+	my $chimerapath = $pathroot."chimeras.fa";
+	my $nonchimerapath = $pathroot."nonchimeras.fa";
+	my $otuspath = $pathroot."otus.fa";
+	my $ucpath = $pathroot."map.uc";
+	my $mappath = $pathroot."map.csv";
+	my @clusterstat;
+		#do chimera searching (optional?)
+	my $chimera_cmd = "usearch80 -uchime_denovo $sort_seqs -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
+	my $chimera_log = `$chimera_cmd`;
+	$chimera_log =~ /(\d+)\schimeras/;
+	my $n_chimeras_uchime = $1;
+	my ($nOTUs,$n_chimeras_cluster);
+		#do clustering
+	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
+		
+		my $cluster_cmd = "usearch80 -cluster_otus $sort_seqs -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassign} 2>&1 1>/dev/null";
+		my $cluster_log = `$cluster_cmd`;
+		$cluster_log=~/(\d*)\sOTUs.*(\d*)\schimeras/s;
+		($nOTUs,$n_chimeras_cluster) = ($1,$2);
+	
+	} elsif(${$iterations}{$iter}{cluster_method} = "swarm"){
+		my @bases = ('A','C','T','G');
+		my $randbase = $bases[int(rand(4))];
+		system("sed -i'/^>/ ! s/N/$randbase/g' $nonchimerapath");
+		my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{otuassign} -w $otuspath $nonchimerapath 2>&1";
+		my $cluster_log = `$cluster_cmd`;
+		$cluster_log =~ /Number\sof\sswarms:\s+(\d+)/;
+		($nOTUs,$n_chimeras_cluster) = ($1,"NA");	
+	}
+	
+	print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, $nOTUs otus found\n" if $verbose;
+	
+	#
+	# Map OTUs
+	#
+	my @mapstat;
+	my $idpc;
+	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
+		$idpc=1-(${$iterations}{$iter}{otuassign}/100);
+	} else {
+		$idpc = 0.97;
+	}
+	my $mapcmd = "usearch80 -usearch_global $allfa -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1 1>/dev/null";
+	my $maplog=`$mapcmd`;
+	$maplog =~ /min\s(\d*),\savg\s(\d*),\smax\s(\d*)/s;
+	@mapstat = ($1,$2,$3);
+	convert_uc_and_write("$outpath/temp.map.uc",$mappath);
+	
+	#
+	# Final logging and output
+	#
+	print "Reads successfully mapped to OTUs\n" if $verbose;
+	system("mv $otuspath $outpath/otus_iteration$iter.fa");
+	system("mv $mappath $outpath/map_iteration$iter.csv");
+	
+	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster,@mapstat);
+	return \%log;
+}
+
+sub parse_parameters {
+	my ($inmode, $inparams) = @_;
+	my @itarray;
+	my @paramarray;
+	my $n_singleparams;
+	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-]*$/ } values %$inparams;
+	foreach my $param (keys %$inparams){
+		push @paramarray, $param;
+		if($inmode eq "stat" or $inmode eq "batch"){
+			push @itarray, [$inparams->{$param}];
+		} elsif ($inmode eq "eval"){
+			if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
+				my @values;
+				my $curmax = $1;
+				while ($curmax <= $3){
+					push @values, $curmax;
+					$curmax += $5;
+				}
+				push @itarray, \@values;
+			} elsif($inparams->{$param} =~ /^[a-zA-Z]+(?:,[a-zA-Z]+)+$/){
+				my @values = split ',',$inparams->{$param};
+				push @itarray, \@values;
+			} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
+				push @itarray, [$inparams->{$param}];
+				$n_singleparams++;
+				die "No parameter ranges given, did you mean to use \"--mode run\"?\n" if($n_singleparams == scalar keys %$inparams);
+			} else {
+				die "Could not successfully parse string given for $param\n";
+			}
+		} else {
+			die "Argument passed to --mode not recognised, see \"$script --help\" for more information\n"
+		}
+	}
+	
+	my @allarray;
+	
+	NestedLoops(\@itarray, sub {push @allarray, [ @_ ]});
+	
+	my %iterhash;
+	foreach my $it (0 .. $#allarray){
+		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
+	}
+	return \%iterhash;
+}
+
+sub read_fasta {
+	my ($fapathin) = @_;
+	my %fasta;
+	my $id;
+	open my $fa_in, '<', $fapathin or die "Couldn't open $fapathin\n";
+	while(my $row = <$fa_in>){
+		chomp $row;
+		if($row =~ /^>(.+)$/){
+			$id = $1;
+		} elsif($row =~ /^[ATCGNatcgn]+$/){
+			$fasta{$id} .= $row;
+		} else { die "Couldn't read fasta format in $fapathin" };
+	}
+	close $fa_in;
+	return %fasta;
+}
+
+sub convert_uc_and_write {
+	my ($ucpath,$outpath) = @_;
+	my %tab;
+	my %samples;
+	my %otus;
+	open my $uc, '<', $ucpath or die "Error opening $ucpath\n";
+	while(my $row = <$uc>){
+		chomp $row;
+		if($row =~ /H.*barcodelabel=(\w+);\t(.*)$/){
+			$tab{$1}{$2}++;
+			$samples{$1}=1;
+			$otus{$2}=1;
+		}
+	}
+	close $uc;
+	open my $csv, '>', $outpath or die "Error opening $outpath\n";
+	print $csv "sample,",join(",",sort keys %otus),"\n";
+	foreach my $sample (sort keys %samples){
+		print $csv $sample;
+		foreach my $otu (sort keys %otus){
+			print $csv ",",$tab{$sample}{$otu} ? $tab{$sample}{$otu} : 0;
+		}
+		print $csv "\n";
+	}
+	close $csv;
+}

@@ -21,7 +21,6 @@ my $version = "0.3.1"; #16/5/17
 my $help;
 my $outpath;
 my %parameters;
-my $function;
 my $mode;
 my $display = "groups";
 my $threads = 1;
@@ -46,12 +45,9 @@ USAGE
 ######################################################
 
 GetOptions("output=s"		=> \$outpath,
-	   "function=s"		=> \$function,
 	   "mode=s"		=> \$mode,
 	   "minlength=s"	=> \$parameters{minlength},
 	   "nest"		=> \$parameters{nest},
-	   "cluster_method=s"	=> \$parameters{cluster_method},
-	   "otuassignpc=s"	=> \$parameters{otuassignpc},
 	   "minsize=s"		=> \$parameters{minsize},
 	   "bootstraps=s"	=> \$parameters{bootstraps},
 	   "blasthits=s"	=> \$parameters{blasthits},
@@ -78,8 +74,6 @@ my @files=@ARGV;
 my %paramdefaults = (
 	'nest'			=> 0,
 	'minsize'		=> 2,
-	'cluster_method'	=> 'usearch',
-	'otuassignpc'		=> 3,
 	'bootstraps'		=> 10000,
 	'blasthits'		=> 100,
 	'blastthreshold'	=> 0.2,
@@ -89,33 +83,18 @@ my %paramdefaults = (
 );
 
 #print Dumper \%paramdefaults;
-my %params = (
-	'shared' => ['minlength','nest','minsize'],
-	'select' => ['bootstraps', 'blasthits','blasttarget','pvalue','blastthreshold','pvalue_maxthreshold','identity'],
-	'cluster' => ['cluster_method','otuassignpc'],
-);
+my @params = ('minlength','nest','minsize','bootstraps','blasthits','blasttarget',
+		'pvalue','blastthreshold','pvalue_maxthreshold','identity');
 
-if($function eq "select"){
-	$mode = "stat" unless(defined $mode);
-	die "Error: clustering parameter(s) specified while in \"select\" function\n" if(any {defined $_} @parameters{@{$params{cluster}}});
-	delete @parameters{@{$params{cluster}}};
-	die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
-	@parameters{@{$params{shared}},@{$params{select}}} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@{$params{shared}},@{$params{select}});
-	print "Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n" if($mode eq "batch" and scalar @files < 2);
-} elsif($function eq "cluster"){
-	$mode = "batch" unless(defined $mode);
-	die "Error: selection parameter(s) specified while in \"cluster\" function\n" if(any {defined $_} @parameters{@{$params{select}}});
-	delete @parameters{@{$params{select}}};
-	@parameters{@{$params{shared}},@{$params{cluster}}} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@{$params{shared}},@{$params{cluster}});
-} else {
-	die "Error: function not recognised, it must be specified, see \"$script --help\" for more information\n";
-}
-
+$mode = "stat" unless(defined $mode);
+die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
+@parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
+print "Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n" if($mode eq "batch" and scalar @files < 2);
 die "Error: minlength must be specified\n" unless(defined $parameters{minlength});
 
 #print Dumper \%parameters;
 
-print "\nParameters parsed successfully, function is \"$function\" and mode is \"$mode\"\n" if $verbose;
+print "\nParameters parsed successfully, mode is \"$mode\"\n" if $verbose;
 
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
@@ -171,81 +150,49 @@ if ($mode eq "stat"){
 my %log;
 
 my %stats = (
-	shared  => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups_discarded_<minsize','n_groups_remain'],
+	general => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups_discarded_<minsize','n_groups_remain'],
 	group   => ['mean_groupsize','stdev_groupsize','min_groupsize','max_groupsize','max_groupsize_pc'],
 	filter  => ['filteroutcome','groupselected','bootstrap_pvalue','n_groups_pooled','selected_rank','pooled_size'],
-	cluster => ['cluster_input_seqs','n_otus','n_unique_otu_member_seqs','n_chimeras','min_otu_length','mean_otu_length','max_otu_length']
 );
 
-my $allfasta;
 
 my $logline;
-if ($function eq "cluster"){
+if($mode eq "stat"){
+	print "\nProcessing sample\n" if $verbose;
+	$log{1} = read_group_and_filter($files[0],$iterations,1,$blastthreads,\@params,\%stats);
+	histograms_and_output($log{1},$disp_stat,$outpath);
+} elsif($mode eq "batch" or $mode eq "eval"){
+	
 	my $pm = Parallel::ForkManager->new($threads);
 	my $done_iterations=0;
 
 	$pm->run_on_finish( sub {
 		my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 		$done_iterations++;
-		printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1) if $verbose and $mode eq 'eval';
+		printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1)*($#files+1) if $verbose;
 		my $line = $data_structure_reference->{line};
 		$log{$line} = $data_structure_reference->{result};
 	});
 	
-	print "Starting clustering\n" if $verbose and $mode eq "batch";
-	printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+1) if $verbose and $mode eq "eval";
-
-	foreach my $iter (@n_iter){;
-		my $pid = $pm->start and next;
+	printf "Starting %d filtering iterations using $threads threads\n", ($#n_iter+1)*($#files+1) if $verbose;
+	foreach my $file (@files){
+		foreach my $iter (@n_iter){;
+			my $pid = $pm->start and next;
 		
-		$logline++;
-		my $out = group_sort_and_cluster($allfasta,$allfa,$iterations,$iter,\%params,\%stats,$threads>1 ? $pid : "");
+			$logline++;
+			my $out = read_group_and_filter($file,$iterations,$iter,$blastthreads,\@params,\%stats);
 		
-		$pm->finish(0, {result => $out, line => $logline});
+			$pm->finish(0, {result => $out, line => $logline});
+		}
 	}
 	
 	$pm->wait_all_children;
 	print "\n";
-} elsif($function eq "select"){
-	if($mode eq "stat"){
-		print "\nProcessing sample\n" if $verbose;
-		$log{1} = read_group_and_filter($files[0],$iterations,1,$blastthreads,\%params,\%stats);
-		histograms_and_output($log{1},$disp_stat,$outpath);
-	} elsif($mode eq "batch" or $mode eq "eval"){
-		
-		my $pm = Parallel::ForkManager->new($threads);
-		my $done_iterations=0;
-
-		$pm->run_on_finish( sub {
-			my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
-			$done_iterations++;
-			printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1)*($#files+1) if $verbose;
-			my $line = $data_structure_reference->{line};
-			$log{$line} = $data_structure_reference->{result};
-		});
-		
-		printf "Starting %d filtering iterations using $threads threads\n", ($#n_iter+1)*($#files+1) if $verbose;
-		foreach my $file (@files){
-			foreach my $iter (@n_iter){;
-				my $pid = $pm->start and next;
-			
-				$logline++;
-				my $out = read_group_and_filter($file,$iterations,$iter,$blastthreads,\%params,\%stats);
-			
-				$pm->finish(0, {result => $out, line => $logline});
-			}
-		}
-		
-		$pm->wait_all_children;
-		print "\n";
-	} else {
-		die "Mode not recognised\n";
-	}
 } else {
-	die "Function not recognised\n";
+	die "Mode not recognised\n";
 }
 
-if($function eq 'select' and $mode eq 'batch' and $verbose){
+if($mode eq 'batch' and $verbose){
 	my $filtersuccesses;
 	map { $filtersuccesses++ if $log{$_}{filteroutcome} eq "passed" } keys %log;
 	printf "$script successfully selected sequences for $filtersuccesses of %d files with given filtering parameters, see log for details\n",scalar keys @files ;
@@ -255,37 +202,27 @@ if($function eq 'select' and $mode eq 'batch' and $verbose){
 # Output results log
 #
 
-open my $logcsv, '>', "$outpath/$function.$mode.log.csv";
+open my $logcsv, '>', "$outpath/select.$mode.log.csv";
 
-my %head = (
-	'select' =>	[@{$stats{shared}},@{$params{shared}},@{$params{select}},@{$stats{group}},@{$stats{filter}}],
-	'cluster' =>	[@{$stats{shared}},@{$params{shared}},@{$params{cluster}},@{$stats{group}},@{$stats{cluster}}]
-);
-print $logcsv join(',',@{$head{$function}});
+my @head = (@{$stats{general}},@params,@{$stats{group}},@{$stats{filter}});
+print $logcsv join(',',@head);
 
-open my $outfa, '>', "$outpath/$function.sequences.fa" if($mode eq 'batch' and $function eq 'select');
+open my $outfa, '>', "$outpath/select.sequences.fa" if($mode eq 'batch');
 
 foreach my $i (keys %log){
-	print $logcsv "\n",join(',',@{$log{$i}}{@{$head{$function}}});
-	print $outfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and $function eq 'select' and ${$log{$i}}{filteroutcome} eq 'passed');
+	print $logcsv "\n",join(',',@{$log{$i}}{@head});
+	print $outfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and ${$log{$i}}{filteroutcome} eq 'passed');
 }
 close $logcsv;
-close $outfa if($mode eq 'batch' and $function eq 'select');
+close $outfa if($mode eq 'batch');
 
-print "\nCleaning temporary files\n" if($function eq 'cluster' and $verbose);
-system "rm $outpath/*temp*" if($function eq 'cluster');
-
-print "\nCSV log successfully written to $outpath/$function.$mode.log.csv\n" if $verbose;
-print "Fasta of selected sequences successfully written to $outpath/$function.sequences.fa\n" if($mode eq 'batch' and $function eq 'select' and $verbose);
+print "\nCSV log successfully written to $outpath/select.$mode.log.csv\n" if $verbose;
+print "Fasta of selected sequences successfully written to $outpath/select.sequences.fa\n" if($mode eq 'batch' and $verbose);
 
 ##TODO: implement swarm and associated functions
 
 
 exit;
-
-sub read_and_concatenate{
-
-}
 
 sub read_group_and_filter{
 	my ($file,$iterations,$iter,$blastthreads,$params,$stats) = @_;
@@ -334,9 +271,9 @@ sub read_group_and_filter{
 	# Do logging
 	#
 	@log{@{${$stats}{group}}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
-	@log{@{${$stats}{shared}}} = ($name, scalar keys %fasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
+	@log{@{${$stats}{general}}} = ($name, scalar keys %fasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
 	@log{@{${$stats}{filter}}} = @{$filterresult}{@{${$stats}{filter}}};
-	@log{@{${$params}{shared}},@{${$params}{select}}} = @{${$iterations}{$iter}}{@{${$params}{shared}},@{${$params}{select}}};
+	@log{@$params} = @{${$iterations}{$iter}}{@$params};
 	
 	#
 	# Take actions if filtering successful
@@ -355,138 +292,6 @@ sub read_group_and_filter{
 	$log{groups} = $groups;
 	return \%log;
 }
-
-sub group_sort_and_cluster{
-	my ($allfasta,$allfa,$iterations,$iter,$params,$stats,$pid) = @_;
-	my %log;
-	
-	printf "\nClustering iteration $iter of %d\n",scalar keys %$iterations if $verbose;
-	
-	print "Reading and concatenating all files\n" if $verbose;
-	my %allfasta;
-	foreach my $file (@files){
-		my %fasta = read_fasta($file);
-		my ($name,$dir)=fileparse($file);
-		$name =~ s/^(.+)\.[^.]+$/$1/;
-	
-		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
-		
-		@allfasta{keys %fasta} = values %fasta;
-	}
-	die "Error, no sequences in any input fasta" if(scalar keys %$allfasta<1);
-	#
-	# Write all sequences greater than minlength for later mapping
-	#
-	my $minlength_discarded
-	my $allfa = "$outpath/cluster.allreads_iteration$iter.fa";
-	open my $allout, '>', $allfa or die "Error writing to $allfa\n";
-	foreach my $id (keys %$allfasta){
-		if(length(${$allfasta}{$id})>=${$iterations}{$iter}{minlength}){
-			print $allout ">$id\n${$allfasta}{$id}\n";
-		} else {
-			$minlength_discarded++;
-		}
-	}
-	close $allout;
-	
-	print "Concatenated reads written to $outpath/$pid\cluster.allreads.fa\n" if $verbose;
-	
-	#
-	# Group all sequences
-	#
-	print "Dereplicating all sequences longer than ${$iterations}{$iter}{minlength}bp\n" if $verbose;
-	my $derep_seqs = "$outpath/temp/cluster.derep_iteration$iter.fa";
-	my $derep_cmd = "usearch80 -derep_fulllength $allout -fastaout $derep_seqs -sizeout 2>&1";
-	my $derep_log = `$derep_cmd`;
-	$derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s
-	my ($inputseqs,$ngroup,$singletons,$minsize_discarded,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
-	
-	#
-	# Sort by size TODO: replace this with running usearch sortbysize with minlength, and parse  |usearch80 -sortbysize mbtrials.unique.fa -fastaout mbtrials.size.fa -minsize 2|
-
-	#
-	my @gids = keys %$groups;
-	my %groupsort;
-		foreach my $g (@gids){
-			$groupsort{$g} = $groups->{$g}{size};
-	}
-	my ($ngroup,$topsize,$totseq) = @gids ? (scalar keys %groupsort,max(values %groupsort),sum(values %groupsort)) : (0,0,0);
-	my @stat_sorted = sort { $b <=> $a } values %groupsort;
-	my @gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
-	
-	printf "$minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long, %d sequences dereplicated into %d groups\n", sum(@stat_sorted), $#gids+1 if $verbose;
-	
-	#
-	# Output fasta for clustering TODO: replace this with running sed to replace size marker if swarm
-	#
-	my $temppath ="$outpath/$pid\cluster.$iter.temp.fa";
-	my $outfmt;
-	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
-		$outfmt = ";size=";
-	} elsif(${$iterations}{$iter}{cluster_method} eq "swarm"){
-		$outfmt = "_";
-	} else {
-		die "Error: cluster method ${$iterations}{$iter}{cluster_method} not recognised\n";
-	}
-	
-	open my $ds_out, '>', $temppath or die "Error writing to temporary fasta during clustering iteration $iter\n";
-	foreach my $gi (0..$#gids_sorted){
-		print $ds_out ">OTU$gids_sorted[$gi]$outfmt$stat_sorted[$gi]\n";
-		print $ds_out "$groups->{$gids_sorted[$gi]}{seq}\n";
-	}
-	close $ds_out;
-	
-	printf "Temporary fasta of %d groups written for clustering after $minsize_discarded discarded for having fewer than ${$iterations}{$iter}{minsize} members\n", $#gids+1-$minsize_discarded if $verbose;
-	
-	#
-	# Do logging
-	#
-	@log{@{${$stats}{group}}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
-	@log{@{${$stats}{shared}}} = ("Dereplicated concatenated samples", scalar keys %$allfasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
-	@log{@{${$params}{shared}},@{${$params}{cluster}}} = @{${$iterations}{$iter}}{@{${$params}{shared}},@{${$params}{cluster}}};
-	
-	#
-	# Perform clustering
-	#
-	my $pathroot = "$outpath/$pid\cluster.";
-	$pathroot.= $mode eq 'eval' ? "iteration$iter." : "";
-	my $otuspath = $pathroot."otus.fa";
-	my $mappath = $pathroot."map.csv";
-	my @clusterstat;
-	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
-		my $clustercmd = "usearch70 -cluster_otus $temppath -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassignpc} 2>&1 1>/dev/null";
-		my $clusterlog = `$clustercmd`;
-		$clusterlog=~/seqs\s\s(\d*).*OTUs\s\s(\d*).*Members\s\s(\d*).*Chimeras\s\s(\d*)/s; #input sequences, number otus, n_unique_otu_member_seqs, n_chimeras 
-		@clusterstat = ($1,$2,$3,$4);
-	} elsif(${$iterations}{$iter}{cluster_method} = "swarm"){
-	
-	die "Error: swarm not yet implemented\n";
-	
-	}
-	
-	print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, ${$log{$iter}}{'n_otus'} otus found, fasta written to $otuspath\n" if $verbose;
-	
-	#
-	# Map OTUs
-	#
-	my @mapstat;
-	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
-		my $idpc=1-(${$iterations}{$iter}{otuassignpc}/100);
-		my $mapcmd = "usearch70 -usearch_global $allfa -db $otuspath -strand plus -id $idpc -uc $outpath/temp.map.uc 2>&1 1>/dev/null";
-		my $maplog=`$mapcmd`;
-		$maplog =~ /min\s(\d*),\savg\s(\d*),\smax\s(\d*)/s;
-		@mapstat = ($1,$2,$3);
-		convert_uc_and_write("$outpath/temp.map.uc",$mappath);
-	}
-	
-	#
-	# Final logging and output
-	#
-#	print "Reads successfully mapped to OTUs, table written to $mappath\n" if $verbose;
-	@log{@{${$stats}{cluster}}} = (@clusterstat,@mapstat);
-	return \%log;
-}
-
 
 sub histograms_and_output{
 	my ($log,$disp_stat,$outpath) = @_;
@@ -863,34 +668,6 @@ sub histogram {
 	print '#' x ceil($frequencies[$i]/$freq_scale);
 	print "\n";
 	}
-}
-
-
-sub convert_uc_and_write {
-	my ($ucpath,$outpath) = @_;
-	my %tab;
-	my %samples;
-	my %otus;
-	open my $uc, '<', $ucpath or die "Error opening $ucpath\n";
-	while(my $row = <$uc>){
-		chomp $row;
-		if($row =~ /H.*barcodelabel=(\w+);\t(.*)$/){
-			$tab{$1}{$2}++;
-			$samples{$1}=1;
-			$otus{$2}=1;
-		}
-	}
-	close $uc;
-	open my $csv, '>', $outpath or die "Error opening $outpath\n";
-	print $csv "sample,",join(",",sort keys %otus),"\n";
-	foreach my $sample (sort keys %samples){
-		print $csv $sample;
-		foreach my $otu (sort keys %otus){
-			print $csv ",",$tab{$sample}{$otu} ? $tab{$sample}{$otu} : 0;
-		}
-		print $csv "\n";
-	}
-	close $csv;
 }
 
 sub stdev {
