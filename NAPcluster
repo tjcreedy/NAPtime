@@ -46,6 +46,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "mode=s"		=> \$mode,
 	   "minlength=s"	=> \$parameters{minlength},
 	   "cluster_method=s"	=> \$parameters{cluster_method},
+	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
 	   "otuassign=s"	=> \$parameters{otuassign},
 	   "minsize=s"		=> \$parameters{minsize},
 	   "threads=i"		=> \$threads,
@@ -53,62 +54,78 @@ GetOptions("output=s"		=> \$outpath,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
 
+#
+# Check and do parsing of inputs
+#
 print "$usage\n" and exit if($help);
 
 die "I need some files to work on, see \"$script --help\" for more information\n" if(scalar @ARGV == 0);
-
-my @files=@ARGV;
-
-#print Dumper \%parameters;
-
-my %paramdefaults = (
-	'nest'			=> 0,
-	'minsize'		=> 2,
-	'cluster_method'	=> 'usearch',
-	'otuassign'		=> 3,
-);
-
-#print Dumper \%paramdefaults;
-my @params = ('minlength','nest','minsize','cluster_method','otuassign');
-
-$mode = "batch" unless(defined $mode);
-delete @parameters{@params};
-@parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
-
 die "Error: minlength must be specified\n" unless(defined $parameters{minlength});
-
-#print Dumper \%parameters;
-
-print "\nParameters parsed successfully, mode is \"$mode\"\n" if $verbose;
-
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
 } else {
 	print "Creating output directory if needed\n" if $verbose;
 	make_path($outpath);
+	make_path("$outpath/temp/");
 	$outpath =~ s/\/$//;
 }
+
+my @files=@ARGV;
+
+# Set defaults
+$mode = "batch" unless(defined $mode);
+my %paramdefaults = (
+	'filter_chimeras'	=> 'true',
+	'minsize'		=> 2,
+	'cluster_method'	=> 'usearch',
+	'otuassign'		=> 3,
+);
+my @params = keys %parameters;
+@parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
+
+if(!$parameters{filter_chimeras}){
+	$parameters{filter_chimeras} = 'false';
+}elsif($parameters{filter_chimeras} eq 'both'){
+	$parameters{filter_chimeras} = "true,false";
+}
+
+print "\nParameters parsed successfully, mode is \"$mode\"\n" if $verbose;
+
 
 #
 # Set up parameter iterations
 #
 my $iterations = parse_parameters($mode,\%parameters);
-
 my @n_iter = sort keys %$iterations;
 
 printf "%d iterations successfully parsed\n\n",$#n_iter+1 if($verbose and $#n_iter>0);
 
 
 my %log;
-
 my %stats = (
 	general => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups','n_groups_discarded_<minsize','n_groups_remain'],
 	group   => ['mean_groupsize','min_groupsize','max_groupsize'],
-	cluster => ['n_otus','n_chimeras_uchime','n_chimeras_cluster','min_otu_length','mean_otu_length','max_otu_length']
+	cluster => ['n_otus','n_chimeras_uchime','n_chimeras_cluster']
 );
 
-my $allfasta;
+#
+# Read in files
+#
+print "Reading and concatenating all files\n" if $verbose;
+my %allfasta;
+foreach my $file (@files){
+	my %fasta = read_fasta($file);
+#	printf "$file has %d sequences\n", scalar keys %fasta;
+	warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
+	@allfasta{keys %fasta} = values %fasta;
+}
 
+#	printf "Concatenation has %d sequences\n", scalar keys %allfasta;
+#	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
+
+#
+# Do pipeline
+#
 my $logline;
 
 my $pm = Parallel::ForkManager->new($threads);
@@ -129,7 +146,7 @@ foreach my $iter (@n_iter){;
 	my $pid = $pm->start and next;
 	
 	$logline++;
-	my $out = group_sort_and_cluster(\@files,$iterations,$iter,\@params,\%stats,$threads>1 ? $pid : "");
+	my $out = group_sort_and_cluster(\%allfasta,$iterations,$iter,\@params,\%stats,$threads>1 ? $pid : "");
 	
 	$pm->finish(0, {result => $out, line => $logline});
 }
@@ -154,7 +171,7 @@ foreach my $i (keys %log){
 close $logcsv;
 
 print "\nCleaning temporary files\n" if $verbose;
-system "rm $outpath/*temp*";
+#system "rm $outpath/*temp*";
 
 print "\nCSV log successfully written to $outpath/cluster.$mode.log.csv\n" if $verbose;
 
@@ -164,29 +181,34 @@ print "\nCSV log successfully written to $outpath/cluster.$mode.log.csv\n" if $v
 exit;
 
 sub group_sort_and_cluster{
-	my ($files,$iterations,$iter,$params,$stats,$pid) = @_;
+	my ($allfasta,$iterations,$iter,$params,$stats,$pid) = @_;
 	my %log;
 	
 	printf "\nClustering iteration $iter of %d\n",scalar keys %$iterations if $verbose;
+	#
+	# Prepare paths
+	#
+	my $pathroot = "$outpath/temp/cluster.iteration$iter\_";
 	
-	print "Reading and concatenating all files\n" if $verbose;
-	my %allfasta;
-	foreach my $file (@$files){
-		my %fasta = read_fasta($file);
-		my ($name,$dir)=fileparse($file);
-		$name =~ s/^(.+)\.[^.]+$/$1/;
+	my $allreadspath = $pathroot."allreads.fa";
+	my $dereppath = $pathroot."derep.fa";
+	my $sortpath = $pathroot."sort.fa";
+	my $chimerapath = $pathroot."chimeras.fa";
+	my $nonchimerapath = $pathroot."nonchimeras.fa";
+	my $otuspath = $pathroot."otus.fa";
+	my $ucpath = $pathroot."map.uc";
+	my $mappath = $pathroot."map.csv";
 	
-		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
-		
-		@allfasta{keys %fasta} = values %fasta;
-	}
-	die "Error, no sequences in any input fasta" if(scalar keys %$allfasta<1);
+
+
 	#
 	# Write all sequences greater than minlength for later mapping
 	#
 	my $minlength_discarded;
-	my $allfa = "$outpath/temp/allreads_iteration$iter.fa";
-	open my $allout, '>', $allfa or die "Error writing to $allfa\n";
+	
+	
+	open my $allout, '>', $allreadspath or die "Error writing to $allreadspath\n";
+	
 	foreach my $id (keys %$allfasta){
 		if(length(${$allfasta}{$id})>=${$iterations}{$iter}{minlength}){
 			print $allout ">$id\n${$allfasta}{$id}\n";
@@ -196,24 +218,24 @@ sub group_sort_and_cluster{
 	}
 	close $allout;
 	
-	print "Concatenated reads written to $outpath/$pid\cluster.allreads.fa\n" if $verbose;
+	print "Discarded $minlength_discarded sequences for being too short\n";
 	
 	#
 	# Group all sequences
 	#
 	print "Dereplicating all sequences longer than ${$iterations}{$iter}{minlength}bp\n" if $verbose;
-	my $derep_seqs = "$outpath/temp/cluster.derep_iteration$iter.fa";
-	my $derep_cmd = "usearch80 -derep_fulllength $allout -fastaout $derep_seqs -sizeout 2>&1";
+	
+	my $derep_cmd = "usearch80 -derep_fulllength $allreadspath -fastaout $dereppath -sizeout 2>&1";
+#	print "Command: $derep_cmd\n";
 	my $derep_log = `$derep_cmd`;
-	$derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+)\s.+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s;
+#	print "Log:\n$derep_log\n";
+	$derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s;
 	my ($inputseqs,$ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5,$6);
 	
 	#
 	# Sort by size 
 	#
-	
-	my $sort_seqs = "$outpath/temp/cluster.derep_iteration$iter.fa";
-	my $sort_cmd = "usearch80 -sortbysize $derep_seqs -fastaout $sort_seqs -minsize ${$iterations}{$iter}{minsize} 2>&1";
+	my $sort_cmd = "usearch80 -sortbysize $dereppath -fastaout $sortpath -minsize ${$iterations}{$iter}{minsize} 2>&1";
 	my $sort_log = `$sort_cmd`;
 	$sort_log =~ /\s(\d+)\ssequences/;
 	my $n_groups_remain = $1;
@@ -231,56 +253,60 @@ sub group_sort_and_cluster{
 	#
 	# Perform clustering
 	#
-		#prepare paths
-	my $pathroot = "$outpath/temp_$pid/cluster.";
-	$pathroot.= $mode eq 'eval' ? "iteration$iter\_" : "";
-	my $chimerapath = $pathroot."chimeras.fa";
-	my $nonchimerapath = $pathroot."nonchimeras.fa";
-	my $otuspath = $pathroot."otus.fa";
-	my $ucpath = $pathroot."map.uc";
-	my $mappath = $pathroot."map.csv";
-	my @clusterstat;
-		#do chimera searching (optional?)
-	my $chimera_cmd = "usearch80 -uchime_denovo $sort_seqs -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
-	my $chimera_log = `$chimera_cmd`;
-	$chimera_log =~ /(\d+)\schimeras/;
-	my $n_chimeras_uchime = $1;
+#	open my $fh, '>', "temp.txt";
+		
+	my ($n_chimeras_uchime,$clusterinput) = ("NA",$sortpath);
+	if(${$iterations}{$iter}{filter_chimeras} eq "true"){
+		my $chimera_cmd = "usearch80 -uchime_denovo $sortpath -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
+#		print "Command: $chimera_cmd\n";
+		my $chimera_log = `$chimera_cmd`;
+#		print $fh $chimera_log,"\n";
+
+#		print "Log:\n$chimera_log\n";
+		$chimera_log =~ /Writing\s(\d+)\schimeras/;
+		$n_chimeras_uchime = $1;
+#		print "uchime chimeras: $1\n";
+		$clusterinput = $nonchimerapath;
+	}
+	
 	my ($nOTUs,$n_chimeras_cluster);
-		#do clustering
 	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
-		my $cluster_cmd = "usearch80 -cluster_otus $sort_seqs -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassign} 2>&1 1>/dev/null";
+		my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassign} 2>&1";
+#		print "Command: $cluster_cmd\n";
 		my $cluster_log = `$cluster_cmd`;
-		$cluster_log=~/(\d*)\sOTUs.*(\d*)\schimeras/s;
+#		print $fh $cluster_log,"\n";
+#		print "Log:\n$cluster_log\n";
+		$cluster_log =~ /.*\s(\d+)\sOTUs,\s(\d+)\schimeras/s; #.* at beginning of regex ensures last OTU and chimera values selected (the function prints multiple lines of progress using \r!)
+#		print "cluster chimeras: $2\n";
 		($nOTUs,$n_chimeras_cluster) = ($1,$2);
-	
 	} elsif(${$iterations}{$iter}{cluster_method} = "swarm"){
+		
 		my @bases = ('A','C','T','G');
 		my $randbase = $bases[int(rand(4))];
-		system("sed -i'/^>/ ! s/N/$randbase/g' $nonchimerapath");
+		system("sed -i'/^>/ ! s/N/$randbase/g' $clusterinput");
 		my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{otuassign} -w $otuspath $nonchimerapath 2>&1";
 		my $cluster_log = `$cluster_cmd`;
 		$cluster_log =~ /Number\sof\sswarms:\s+(\d+)/;
-		($nOTUs,$n_chimeras_cluster) = ($1,"NA");	
+		($nOTUs,$n_chimeras_cluster) = ($1,"NA");
 	}
-	
+#	close $fh;
 	print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, $nOTUs otus found\n" if $verbose;
 	
 	#
 	# Map OTUs
 	#
-	my @mapstat;
 	my $idpc;
 	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		$idpc=1-(${$iterations}{$iter}{otuassign}/100);
 	} else {
 		$idpc = 0.97;
 	}
-	my $mapcmd = "usearch80 -usearch_global $allfa -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1 1>/dev/null";
+	my $mapcmd = "usearch80 -usearch_global $allreadspath -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1";
+#	print "Command: $mapcmd\n";
 	my $maplog=`$mapcmd`;
-	$maplog =~ /min\s(\d*),\savg\s(\d*),\smax\s(\d*)/s;
-	@mapstat = ($1,$2,$3);
-	convert_uc_and_write("$outpath/temp.map.uc",$mappath);
+#	print "Log:\n$maplog\n";
+	convert_uc_and_write($ucpath,$mappath);
 	
 	#
 	# Final logging and output
@@ -289,7 +315,7 @@ sub group_sort_and_cluster{
 	system("mv $otuspath $outpath/otus_iteration$iter.fa");
 	system("mv $mappath $outpath/map_iteration$iter.csv");
 	
-	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster,@mapstat);
+	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster);
 	return \%log;
 }
 
@@ -342,16 +368,25 @@ sub read_fasta {
 	my ($fapathin) = @_;
 	my %fasta;
 	my $id;
+	my ($name,$dir)=fileparse($fapathin);
+	$name =~ s/^(.+)\.[^.]+$/$1/;
+	my $barcodelabelsadded;
 	open my $fa_in, '<', $fapathin or die "Couldn't open $fapathin\n";
 	while(my $row = <$fa_in>){
 		chomp $row;
 		if($row =~ /^>(.+)$/){
 			$id = $1;
+			if(!$id =~ /;barcodelabel=\w+;/){
+				$barcodelabelsadded++;
+				$id.=";barcodelabel=$name;";
+			}
+			$id =~ s/\s/_/g;
 		} elsif($row =~ /^[ATCGNatcgn]+$/){
 			$fasta{$id} .= $row;
 		} else { die "Couldn't read fasta format in $fapathin" };
 	}
 	close $fa_in;
+	print "File $fapathin missing barcode labels, \";barcodelabel=$name;\" appended to header of $barcodelabelsadded sequences\n" if $barcodelabelsadded and $verbose;
 	return %fasta;
 }
 
