@@ -53,7 +53,6 @@ GetOptions("output=s"		=> \$outpath,
 	   "verbose"		=> \$verbose,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
-
 #
 # Check and do parsing of inputs
 #
@@ -75,7 +74,7 @@ my @files=@ARGV;
 # Set defaults
 $mode = "batch" unless(defined $mode);
 my %paramdefaults = (
-	'filter_chimeras'	=> 'true',
+	'filter_chimeras'	=> 'no',
 	'minsize'		=> 2,
 	'cluster_method'	=> 'usearch',
 	'otuassign'		=> 3,
@@ -83,10 +82,12 @@ my %paramdefaults = (
 my @params = keys %parameters;
 @parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
 
-if(!$parameters{filter_chimeras}){
-	$parameters{filter_chimeras} = 'false';
-}elsif($parameters{filter_chimeras} eq 'both'){
-	$parameters{filter_chimeras} = "true,false";
+if($parameters{filter_chimeras} eq 'both'){
+	$parameters{filter_chimeras} = "yes,no";
+}elsif($parameters{filter_chimeras} eq 'no'){
+	warn "\nWarning: cluster method \"swarm\" does no chimera filtering, it is advisable to use \"--filter_chimeras yes\"\n\n" if $parameters{cluster_method} eq "swarm";
+}elsif($parameters{filter_chimeras} ne 'yes'){
+	die "Error: value $parameters{filter_chimeras} passed to --filter_chimeras not recognised\n";
 }
 
 print "\nParameters parsed successfully, mode is \"$mode\"\n" if $verbose;
@@ -171,7 +172,7 @@ foreach my $i (keys %log){
 close $logcsv;
 
 print "\nCleaning temporary files\n" if $verbose;
-#system "rm $outpath/*temp*";
+system "rm -rd $outpath/temp";
 
 print "\nCSV log successfully written to $outpath/cluster.$mode.log.csv\n" if $verbose;
 
@@ -256,7 +257,7 @@ sub group_sort_and_cluster{
 #	open my $fh, '>', "temp.txt";
 		
 	my ($n_chimeras_uchime,$clusterinput) = ("NA",$sortpath);
-	if(${$iterations}{$iter}{filter_chimeras} eq "true"){
+	if(${$iterations}{$iter}{filter_chimeras} eq "yes"){
 		my $chimera_cmd = "usearch80 -uchime_denovo $sortpath -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
 #		print "Command: $chimera_cmd\n";
 		my $chimera_log = `$chimera_cmd`;
@@ -284,9 +285,13 @@ sub group_sort_and_cluster{
 		
 		my @bases = ('A','C','T','G');
 		my $randbase = $bases[int(rand(4))];
-		system("sed -i'/^>/ ! s/N/$randbase/g' $clusterinput");
-		my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{otuassign} -w $otuspath $nonchimerapath 2>&1";
+		my $sed_cmd = "sed -i -e'/^>/ ! s/N/$randbase/g' $clusterinput";
+		print $sed_cmd,"\n";
+		system($sed_cmd);
+		my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{otuassign} -w $otuspath $clusterinput 2>&1";
+		print $cluster_cmd,"\n";
 		my $cluster_log = `$cluster_cmd`;
+		print $cluster_log,"\n";
 		$cluster_log =~ /Number\sof\sswarms:\s+(\d+)/;
 		($nOTUs,$n_chimeras_cluster) = ($1,"NA");
 	}
@@ -312,9 +317,10 @@ sub group_sort_and_cluster{
 	# Final logging and output
 	#
 	print "Reads successfully mapped to OTUs\n" if $verbose;
-	system("mv $otuspath $outpath/otus_iteration$iter.fa");
-	system("mv $mappath $outpath/map_iteration$iter.csv");
-	
+	if($mode eq 'batch'){
+		system("mv $otuspath $outpath/otus_iteration$iter.fa");
+		system("mv $mappath $outpath/map_iteration$iter.csv");
+	}
 	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster);
 	return \%log;
 }
