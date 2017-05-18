@@ -237,7 +237,7 @@ sub merge_iteration {
 	
 	my $suffix = $mode eq "run" ? "" : "_iteration$iter";
 	
-	my $readlabelcmd="sed \"-es/^>\\(.*\\)/>\\1;barcodelabel=${$iterations}{$iter}{name};/\" < $outpath/$last/${$iterations}{$iter}{name}.fa > $outpath/${$iterations}{$iter}{name}$suffix.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
+	my $readlabelcmd="sed \"-es/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=${$iterations}{$iter}{name};/\" < $outpath/$last/${$iterations}{$iter}{name}.fa > $outpath/${$iterations}{$iter}{name}$suffix.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
 	system($readlabelcmd);
 	
 	remove_tree("$outpath/merge_$iter","$outpath/filter_$iter");
