@@ -146,10 +146,9 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (@n_iter){;
 	my $pid = $pm->start and next;
 	
-	$logline++;
-	my $out = group_sort_and_cluster(\%allfasta,$iterations,$iter,\@params,\%stats,$threads>1 ? $pid : "");
+	my $out = group_sort_and_cluster(\%allfasta,$iterations,$iter,\@params,\%stats);
 	
-	$pm->finish(0, {result => $out, line => $logline});
+	$pm->finish(0, {result => $out, line => $iter});
 }
 
 $pm->wait_all_children;
@@ -182,7 +181,7 @@ print "\nCSV log successfully written to $outpath/cluster.$mode.log.csv\n" if $v
 exit;
 
 sub group_sort_and_cluster{
-	my ($allfasta,$iterations,$iter,$params,$stats,$pid) = @_;
+	my ($allfasta,$iterations,$iter,$params,$stats) = @_;
 	my %log;
 	
 	printf "\nClustering iteration $iter of %d\n",scalar keys %$iterations if $verbose;
@@ -200,8 +199,6 @@ sub group_sort_and_cluster{
 	my $ucpath = $pathroot."map.uc";
 	my $mappath = $pathroot."map.csv";
 	
-
-
 	#
 	# Write all sequences greater than minlength for later mapping
 	#

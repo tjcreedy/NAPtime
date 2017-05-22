@@ -23,7 +23,7 @@ my $outpath;
 my %parameters;
 my $mode;
 my $display = "groups";
-my $threads = 1;
+our $threads = 1;
 our $blastpath;
 our $verbose;
 
@@ -63,9 +63,11 @@ GetOptions("output=s"		=> \$outpath,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
 
+print "\nThis is $script version $version. Checking your inputs...\n";
+
 print "$usage\n" and exit if($help);
 
-die "I need some files to work on, see \"$script --help\" for more information\n" if(scalar @ARGV == 0);
+die "\nI need some files to work on, see \"$script --help\" for more information\n\n" if(scalar @ARGV == 0);
 
 my @files=@ARGV;
 
@@ -89,17 +91,20 @@ my @params = ('minlength','nest','minsize','bootstraps','blasthits','blasttarget
 $mode = "stat" unless(defined $mode);
 die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
 @parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
-print "Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n" if($mode eq "batch" and scalar @files < 2);
+if($mode eq "batch" and scalar @files < 2){
+	print "\nWARNING: Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n\n" ;
+	sleep(3);
+}
 die "Error: minlength must be specified\n" unless(defined $parameters{minlength});
 
 #print Dumper \%parameters;
 
-print "\nParameters parsed successfully, mode is \"$mode\"\n" if $verbose;
+
 
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
 } else {
-	print "Creating output directory if needed\n" if $verbose;
+	print "Creating output directory if needed\n";
 	make_path($outpath);
 	$outpath =~ s/\/$//;
 }
@@ -126,14 +131,14 @@ if($mode eq "stat"){
 	$blastthreads = floor($threads /scalar @files);
 }
 
+print "Inputs and parameters parsed successfully, mode is \"$mode\". Calculating iterations...\n";
+
 #
 # Set up parameter iterations
 #
 my $iterations = parse_parameters($mode,\%parameters);
 
 my @n_iter = sort keys %$iterations;
-
-printf "%d iterations successfully parsed\n\n",$#n_iter+1 if($verbose and $#n_iter>0);
 
 my ($disp_stat,$disp_n);
 if ($mode eq "stat"){
@@ -146,6 +151,7 @@ if ($mode eq "stat"){
 	}
 } # OTHER ERROR CATCHES?
 
+printf "%d iterations successfully parsed. Ready to start processing.\n",$#n_iter+1;
 
 my %log;
 
@@ -169,17 +175,18 @@ if($mode eq "stat"){
 	$pm->run_on_finish( sub {
 		my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 		$done_iterations++;
-		printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1)*($#files+1) if $verbose;
+		printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1)*($#files+1) unless $verbose;
+		
 		my $line = $data_structure_reference->{line};
 		$log{$line} = $data_structure_reference->{result};
 	});
 	
-	printf "Starting %d filtering iterations using $threads threads\n", ($#n_iter+1)*($#files+1) if $verbose;
+	printf "\nStarting %d filtering iterations using $threads threads:\n", ($#n_iter+1)*($#files+1);
 	foreach my $file (@files){
 		foreach my $iter (@n_iter){;
 			my $pid = $pm->start and next;
 		
-			$logline++;
+			$logline = "$file.$iter";
 			my $out = read_group_and_filter($file,$iterations,$iter,$blastthreads,\@params,\%stats);
 		
 			$pm->finish(0, {result => $out, line => $logline});
@@ -187,15 +194,15 @@ if($mode eq "stat"){
 	}
 	
 	$pm->wait_all_children;
-	print "\n";
+	print "\n" unless $verbose;
 } else {
 	die "Mode not recognised\n";
 }
 
-if($mode eq 'batch' and $verbose){
+if($mode eq 'batch'){
 	my $filtersuccesses;
 	map { $filtersuccesses++ if $log{$_}{filteroutcome} eq "passed" } keys %log;
-	printf "$script successfully selected sequences for $filtersuccesses of %d files with given filtering parameters, see log for details\n",scalar keys @files ;
+	printf "\n$script successfully selected sequences for $filtersuccesses of %d files with given filtering parameters, see log for details\n",scalar keys @files ;
 }
 
 #
@@ -216,13 +223,16 @@ foreach my $i (keys %log){
 close $logcsv;
 close $outfa if($mode eq 'batch');
 
-print "\nCSV log successfully written to $outpath/select.$mode.log.csv\n" if $verbose;
-print "Fasta of selected sequences successfully written to $outpath/select.sequences.fa\n" if($mode eq 'batch' and $verbose);
-
-##TODO: implement swarm and associated functions
-
+print "\nCSV log successfully written to $outpath/select.$mode.log.csv\n";
+print "Fasta of selected sequences successfully written to $outpath/select.sequences.fa\n" if($mode eq 'batch');
+print "\n";
 
 exit;
+
+sub timestamp{
+my @time = localtime;
+return sprintf "%02d:%02d:%02d",$time[2],$time[1],$time[0];
+}
 
 sub read_group_and_filter{
 	my ($file,$iterations,$iter,$blastthreads,$params,$stats) = @_;
@@ -238,15 +248,16 @@ sub read_group_and_filter{
 	$name =~ s/^(.+)\.[^.]+$/$1/;
 	warn "Warning: file $name is empty!\n" if(scalar keys %fasta < 1);
 	
-	##printf "\nProcessing file $i_file of %d: $name\n", $#files+1 if($verbose and $#files>0);
-	printf "\nParameter iteration $iter of %d for $name\n", $#n_iter+1 if($verbose and $#n_iter>0);
+	printf "%s: starting parameter iteration $iter of %d for $name with pid $$\n", timestamp(), $#n_iter+1 if($verbose and $#n_iter>0);
+	my $printstring = join "", ($threads>1 and ($#n_iter>0 or $#files>0)) ? "pid $$ " : "", $name, $#n_iter>1 ? " iteration $iter" : "";
 	
 	#
 	# Grouping function
 	#
-	print "Grouping all sequences longer than ${$iterations}{$iter}{minlength}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
-	my ($groups,$minlength_discarded,$minsize_discarded) = group(\%fasta,${$iterations}{$iter});
-
+	print timestamp(),": $printstring grouping all sequences longer than ${$iterations}{$iter}{minlength}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
+	my ($groups,$minlength_discarded,$minsize_discarded) = group(\%fasta,${$iterations}{$iter},$printstring);
+	print timestamp(),": $printstring $minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long\n" if $verbose;
+	print timestamp(),": $printstring $minsize_discarded groups discarded for having fewer than ${$iterations}{$iter}{minsize} sequences\n" if $verbose;
 	#
 	# Sort groups by size
 	#
@@ -256,16 +267,14 @@ sub read_group_and_filter{
 		$groupsort{$g} = $groups->{$g}{size};
 	}
 	my ($ngroup,$topsize,$totseq) = @gids ? (scalar keys %groupsort,max(values %groupsort),sum(values %groupsort)) : (0,0,0);
-	printf "%d sequences grouped after $minlength_discarded discarded for being less than ${$iterations}{$iter}{minlength}bp long. $minsize_discarded groups discarded for having fewer than ${$iterations}{$iter}{minsize} sequences, %d groups remain containing %d sequences\n", @gids ? scalar keys %fasta : 0, $ngroup, $totseq if($verbose or $mode eq 'stat');
+	print timestamp(),": $printstring $ngroup groups remain containing $totseq sequences\n" if($verbose or $mode eq 'stat');
 
 	#
 	#Filtering
 	#
-	printf "Filtering %d groups\n", $ngroup if $verbose;
+	print timestamp(),": $printstring filtering $ngroup groups\n",   if $verbose;
 	
-	my $filterresult = filter_groups($groups,${$iterations}{$iter},$stats{filter},$blastthreads);
-	
-	warn "Warning, BLAST failed 5 times when filtering groups for $file" if exists(${$filterresult}{blastwarning});
+	my $filterresult = filter_groups($groups,${$iterations}{$iter},$stats{filter},$blastthreads,$printstring);
 	
 	#
 	# Do logging
@@ -279,17 +288,17 @@ sub read_group_and_filter{
 	# Take actions if filtering successful
 	#
 	if (${$filterresult}{filteroutcome} eq 'passed'){
-		print "Candidate sequence selected, see log for details\n" if $verbose;
+		print timestamp(),": $printstring candidate sequence selected\n" if $verbose;
 		$log{sequence} = $groups->{$log{groupselected}}{seq};
 	} else {
-		print "No candidate sequence could be selected, see log for details\n" if $verbose;
+		print timestamp(),": $printstring no candidate sequence could be selected, see log for details\n" if $verbose;
 		$log{sequence} = "-";
 	}
 	
 	#
 	# Record groups and return
 	#
-	$log{groups} = $groups;
+	#$log{groups} = $groups;
 	return \%log;
 }
 
@@ -422,16 +431,13 @@ sub read_fasta {
 }
 
 sub group {
-	my ($fa,$specs) = @_;
+	my ($fa,$specs,$printstring) = @_;
 #Sort all sequences in the fasta by length, so the sequence that initialises a group will always be the longest
-	print "sorting sequences by size\n";
 	my @ids = sort { length($fa->{$b}) <=> length($fa->{$a}) } keys %$fa;
-	printf "%d sequences\n",scalar @ids;
 	my %fa_grouped;
 	my @group_ids;
 	my $group_id;
 	my $minlength_discarded = 0;
-	print "start grouping\n";
 	foreach my $i (0 .. $#ids){
 		my $start = -1;
 		if(length($fa->{$ids[$i]}) <= ${$specs}{minlength}){
@@ -454,16 +460,17 @@ sub group {
 				push @group_ids, $group_id;
 			}
 		}
-	printf "processed %d/%d sequences, currently at %d groups\r",$i+1,scalar @ids,$group_id+1;
+		my $ngrouped = ($i+1)-$minlength_discarded;
+		printf "%s: $printstring grouped %d/%d sequences into %d groups, %d too short\n",timestamp(),$ngrouped,scalar @ids,$group_id+1,$minlength_discarded,if($verbose and (($ngrouped/1000)=~/^\d+$/ or $i==$#ids));
 	}
 	my $minsize_discarded = 0;
-	print "Removing groups that are too small...";
+#	print "Removing groups that are too small...";
 	if(${$specs}{minsize}>1){
 		foreach my $g (keys %fa_grouped){
 			delete $fa_grouped{$g} and $minsize_discarded++ if($fa_grouped{$g}{size}<${$specs}{minsize});
 		}
 	}
-	print "$minsize_discarded removed\n";
+#	print "$minsize_discarded removed\n";
 	return(\%fa_grouped,$minlength_discarded,$minsize_discarded);
 }
 
@@ -500,7 +507,7 @@ sub add_group {
 }
 
 sub filter_groups{
-	my ($groups,$specs,$loghead,$blastthreads) = @_;
+	my ($groups,$specs,$loghead,$blastthreads,$printstring) = @_;
 	
 	my @gids = keys %$groups;
 	my %groupsort;
@@ -513,65 +520,70 @@ sub filter_groups{
 	
 	my %log;
 	
-	print "\nStarting filtering in order of group size (largest->smallest)\n" if $verbose;
+	print timestamp(),": $printstring starting filtering in order of group size (largest->smallest)\n" if $verbose;
 	
 	my $gselection=1;
 	my $groupspooled=0;
 	while(1){
-		printf "\nAssessing group $gselection%s\n",$groupspooled>0 ? "(pool of $groupspooled)":"" if $verbose;
+		printf "%s: $printstring assessing group $gselection%s\n", timestamp(), $groupspooled>0 ? "(pool of $groupspooled)":"" if $verbose;
 		if (!@stat_sorted){
-			print "No sequences passed grouping parameters, entire sample discarded\n";
+			print timestamp(),": $printstring no sequences passed grouping parameters, entire sample discarded\n";
 			@log{@$loghead} = ('nosequences',("NA") x 4,0);
 			last;
 		}
 		
 		#1: Bootstrap
+		printf "%s: $printstring running ${$specs}{bootstraps} bootstraps placing %d sequences randomly into %d groups to find probability of group with %d members\n", 
+						timestamp(), sum(@stat_sorted),scalar @stat_sorted, max(@stat_sorted), if $verbose;
+		
 		my $pvalue = bootstrap(${$specs}{bootstraps},@stat_sorted);
 		
-		print "Bootstrap value $pvalue against ${$specs}{pvalue} (max ${$specs}{pvalue_maxthreshold})\n" if $verbose;
+		print timestamp(),": $printstring bootstrap value $pvalue against ${$specs}{pvalue} (max ${$specs}{pvalue_maxthreshold})\n" if $verbose;
 		
 		if($pvalue >= ${$specs}{pvalue_maxthreshold}){
 			@log{@$loghead} = ('exceeded_max_pvalue','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
-			print "Group $gselection exceeded maximum pvalue, entire sample discarded\n" if $verbose;
+			print timestamp(),": $printstring group $gselection exceeded maximum pvalue, entire sample discarded\n" if $verbose;
 			last;
 		}elsif($pvalue <= ${$specs}{pvalue}){
 			#2. BLAST
+			print timestamp(),": $printstring BLASTing with $blastthreads threads for best-guess taxonomy to check against target \"${$specs}{blasttarget}\"\n" if $verbose;
 			my @blastbestguess = taxonomyblast(($groups->{$gids_sorted[0]}{seq}),$specs,$blastthreads);
 			my %blast;
 			if(!@blastbestguess){
-				$log{blastwarning} = 1;
+				print timestamp(),": $printstring WARNING: could not retrieve a BLAST taxonomy, BLAST likely failed all 5 tries\n";
 			} else {
+				print timestamp(),": $printstring retrieved taxonomy\n" if $verbose;
 				%blast = map { $_ => 1} @blastbestguess;
 			}
 			if(exists($blast{${$specs}{blasttarget}})){
 				@log{@$loghead} = ('passed',$gids_sorted[0],$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
-				print "Group $gselection passed filter, done\n" if $verbose;
+				print timestamp(),": $printstring group $gselection passed filter, done\n" if $verbose;
 				last;
 			}
 		}
 		
 		if($#gids_sorted == 0){
-			print "Group $gselection not sufficiently distinct or similar to target taxon. No further groups exist, entire sample discarded\n" if $verbose;
+			print timestamp(),": $printstring group $gselection not sufficiently distinct or similar to target taxon. No further groups exist, entire sample discarded\n" if $verbose;
 			@log{@$loghead} = ('groups_exhausted','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
 			last;
 		}
 		
-		print "Group $gselection did not pass. Checking similarity to next-largest group to see if pooling groups is appropriate\n" if $verbose;
+		print timestamp(),": $printstring group $gselection did not pass. Checking similarity to next-largest group to see if pooling groups is appropriate\n" if $verbose;
 		#Calculate similarity
 		my $muscle = `printf \">".$gids_sorted[0]."\\n".$groups->{$gids_sorted[0]}{seq}."\\n>".$gids_sorted[1]."\\n".$groups->{$gids_sorted[1]}{seq}."\\n\" | muscle 2> /dev/null`;
 		my @muscleout = split("\n",$muscle);
 		my $pc_id = identity($muscleout[1],$muscleout[3]);
-		print "Groups are $pc_id identical, against criterion of ${$specs}{identity}\n" if $verbose;
+		print timestamp(),": $printstring groups are $pc_id identical, against criterion of ${$specs}{identity}\n" if $verbose;
 		#Check similarity
 		if ($pc_id >= ${$specs}{identity}) {
-			print "Groups are similar enough, pooling together and starting again with the pooled group...\n" if $verbose;
+			print timestamp(),": $printstring groups are similar enough, pooling together and starting again with the pooled group...\n" if $verbose;
 			my $maxstat = shift @stat_sorted;
 			my $maxgid = shift @gids_sorted;
 			$stat_sorted[0] += $maxstat;
 			$gids_sorted[0] = $maxgid;
 			$groupspooled++;
 		} else {
-			print "Groups are not similar enough, discarding group $gselection and starting again with next-largest group...\n" if $verbose;
+			print timestamp(),": $printstring groups are not similar enough, discarding group $gselection and starting again with next-largest group...\n" if $verbose;
 			shift @stat_sorted;
 				shift @gids_sorted;
 			$gselection+=1+$groupspooled;
@@ -588,8 +600,6 @@ sub bootstrap{
 	my $ngroups = $#values+1;
 	my $nseqs = sum(@values);
 	
-	print "Running $boots bootstraps placing $nseqs sequences randomly into $ngroups groups to find probability of group with $max members\n";
-	
 	my $nsuccesses = 0;
 	foreach (1..$boots) {
 		my %grp;
@@ -602,7 +612,6 @@ sub bootstrap{
 
 sub taxonomyblast{
 	my ($seq,$parameters,$blastthreads) = @_;
-	print "Blasting\n" if $verbose;
 	my $blastcmd = "blastn -query <(echo -e \">sample\\n$seq\") -db $blastpath -num_threads $blastthreads -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 sacc bitscore\"";
 	my $blastdump;
 	my $blasttries = 0;
@@ -612,7 +621,6 @@ sub taxonomyblast{
 	}
 	my @out;
 	if($blastdump){
-		print "Retrieving taxonomy information\n" if $verbose;
 		my @accessions = ($blastdump =~ /(?:^|\n)(\w+)/g);
 		my $accessionstring = join ",",@accessions;
 #		print $accessionstring,"\n";
