@@ -21,6 +21,10 @@ my $version = "0.3.2"; #22/5/17
 my $help;
 my $outpath;
 my %parameters;
+my %blastparams =(
+	blasthits => 25,
+	assignsens => 0.25
+);
 my $mode;
 my $threads = 1;
 our $verbose;
@@ -49,6 +53,9 @@ GetOptions("output=s"		=> \$outpath,
 	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
 	   "otuassign=s"	=> \$parameters{otuassign},
 	   "minsize=s"		=> \$parameters{minsize},
+	   "blastpath=s"	=> \$blastparams{blastpath},
+	   "blasthits=s"	=> \$blastparams{blasthits},
+	   "assignsens=s"	=> \$blastparams{assignsens},
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
@@ -70,6 +77,25 @@ if(!defined $outpath){
 }
 
 my @files=@ARGV;
+
+#
+# Check for blast database and arrange threads
+#
+
+if(!$blastparams{blastpath}){
+	my $host = hostname;
+	my %paths = (
+		'ctag' => '/dh/blastdb/nt',
+		'hpc-watson' => '/db/blastdb/nt'
+	);
+	if(exists($paths{$host})){
+		$blastparams{blastpath} = $paths{$host};
+	} else {
+		die "Error: no path to BLAST database found, please give me one using --blastpath <path>\n";
+	}
+};
+$blastparams{blastthreads} = $threads;
+
 
 # Set defaults
 $mode = "batch" unless(defined $mode);
@@ -103,6 +129,7 @@ printf "%d iterations successfully parsed\n\n",$#n_iter+1 if($verbose and $#n_it
 
 
 my %log;
+my %otusets;
 my %stats = (
 	general => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups','n_groups_discarded_<minsize','n_groups_remain'],
 	group   => ['mean_groupsize','min_groupsize','max_groupsize'],
@@ -115,7 +142,7 @@ my %stats = (
 print "Reading and concatenating all files\n" if $verbose;
 my %allfasta;
 foreach my $file (@files){
-	my %fasta = read_fasta($file);
+	my %fasta = read_fasta($file,"check");
 #	printf "$file has %d sequences\n", scalar keys %fasta;
 	warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
 	@allfasta{keys %fasta} = values %fasta;
@@ -127,7 +154,6 @@ foreach my $file (@files){
 #
 # Do pipeline
 #
-my $logline;
 
 my $pm = Parallel::ForkManager->new($threads);
 my $done_iterations=0;
@@ -136,8 +162,9 @@ $pm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$done_iterations++;
 	printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1) if $verbose and $mode eq 'eval';
-	my $line = $data_structure_reference->{line};
-	$log{$line} = $data_structure_reference->{result};
+	my $iter = $data_structure_reference->{iter};
+	$log{$iter} = $data_structure_reference->{log};
+	$otusets{$iter} = $data_structure_reference->{otus};
 });
 
 print "Starting clustering\n" if $verbose and $mode eq "batch";
@@ -146,13 +173,42 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (@n_iter){;
 	my $pid = $pm->start and next;
 	
-	my $out = group_sort_and_cluster(\%allfasta,$iterations,$iter,\@params,\%stats);
+	my ($log,$otus) = group_sort_and_cluster(\%allfasta,$iterations,$iter,\@params,\%stats);
 	
-	$pm->finish(0, {result => $out, line => $iter});
+	$pm->finish(0, {log => $log, otus => $otus, line => $iter});
 }
 
 $pm->wait_all_children;
 print "\n";
+
+#
+# Process otus
+#
+
+print "BLASTing OTUs across all iterations and making best-guess taxonomies\n";
+
+my %allotuseqs;
+foreach my $iter (keys %otusets){
+	foreach my $seq (keys %{$otusets{$iter}}){
+		push(@{$allotuseqs{$seq}},"$iter,$otusets{$iter}{$seq}");
+	}
+}
+
+my %seqstoblast;
+@seqstoblast{0..scalar keys %allotuseqs} = keys %allotuseqs;
+
+my %taxonomies = batch_taxonomyblast(\%seqstoblast,\%blastparams);
+
+open my $taxout, '>', "$outpath/cluster.otus.taxonomy.txt";
+print $taxout "iteration,otu_id,duplicate,taxonomy_lineage\n";
+foreach my $id (keys %seqstoblast){
+	my @duplicates = @{$allotuseqs{$seqstoblast{$id}}};
+	foreach my $i (0..$#duplicates){
+		print $taxout "$duplicates[$i],$i",join(";",@{$taxonomies{$id}}),"\n";
+	}
+}
+
+
 
 #
 # Output results log
@@ -180,6 +236,59 @@ print "\nCSV log successfully written to $outpath/cluster.$mode.log.csv\n" if $v
 
 exit;
 
+sub batch_taxonomyblast{
+	my ($queryhash,$parameters) = @_;
+	my $querypath = "tempblastfasta.fa";
+	my @ids = keys %$queryhash;
+	my %out;
+	
+	# output fasta
+	open my $ofa, '>', "temp.fa";
+	foreach my $id (keys %$queryhash){
+		print $ofa ">$id\n${$queryhash}{$id}\n";
+	}
+	close $ofa;
+	
+	# blast
+	my $blastcmd = "blastn -query $querypath -db ${$parameters}{blastpath} -num_threads ${$parameters}{blastthreads} -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 sacc bitscore\"";
+	my $blastdump;
+	my $blasttries = 0;
+	while(!$blastdump && $blasttries<5){
+		$blasttries++;
+		print "blasting $blasttries\n";
+		$blastdump = qx(bash -c '$blastcmd');
+	}
+	
+	if($blastdump){
+		print "Retrieving taxonomy information\n";
+		my @accessions = ($blastdump =~ /(?:^|\n)(\w+)/g);
+		my $accessionstring = join ",",@accessions;
+		my $nucdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta");
+		my $taxidstring = join ",",($nucdump =~ /<TSeq_taxid>(.*)<\/TSeq_taxid/g);
+		my $taxdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
+		my @lineages = ($taxdump =~ /<Lineage>(.*)<\/Lineage>/g);
+		foreach my $n (0..$#ids){
+			my @linaoa;
+			my $min = $n*${$parameters}{blasthits};
+			my $max = ($n+1)*${$parameters}{blasthits}-1;
+			foreach my $i ($min..$max){
+				push @linaoa,[ split /;\s/,$lineages[$i] ];
+			}
+			my $ti = -1;
+			my @htind = (1..$#linaoa);
+			while($ti < scalar @{$linaoa[0]}-1){
+				$ti++;
+				@htind = grep { $linaoa[$_][$ti] =~ $linaoa[0][$ti] } @htind;
+				$ti-- and last if($#htind/$#linaoa <= ${$parameters}{assignsens});
+			}
+			$out{$ids[$n]} = [ @{$linaoa[0]}[0..$ti] ];
+		}
+	}
+	
+	system("rm $querypath");
+	return \%out;
+}
+
 sub group_sort_and_cluster{
 	my ($allfasta,$iterations,$iter,$params,$stats) = @_;
 	my %log;
@@ -203,7 +312,6 @@ sub group_sort_and_cluster{
 	# Write all sequences greater than minlength for later mapping
 	#
 	my $minlength_discarded;
-	
 	
 	open my $allout, '>', $allreadspath or die "Error writing to $allreadspath\n";
 	
@@ -296,6 +404,13 @@ sub group_sort_and_cluster{
 	print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, $nOTUs otus found\n" if $verbose;
 	
 	#
+	# Read OTUs to hash for output
+	#
+	
+	my %otus = read_fasta($otuspath);
+	my %otus_rev = map { $otus{$_} => $_ } keys %otus;
+	
+	#
 	# Map OTUs
 	#
 	my $idpc;
@@ -319,7 +434,7 @@ sub group_sort_and_cluster{
 		system("mv $mappath $outpath/map_iteration$iter.csv");
 	}
 	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster);
-	return \%log;
+	return (\%log,\%otus_rev);
 }
 
 sub parse_parameters {
@@ -368,7 +483,7 @@ sub parse_parameters {
 }
 
 sub read_fasta {
-	my ($fapathin) = @_;
+	my ($fapathin,$checklabel) = @_;
 	my %fasta;
 	my $id;
 	my ($name,$dir)=fileparse($fapathin);
@@ -379,7 +494,7 @@ sub read_fasta {
 		chomp $row;
 		if($row =~ /^>(.+)$/){
 			$id = $1;
-			if(!$id =~ /;barcodelabel=\w+;/){
+			if($checklabel and !($id =~ /;barcodelabel=\w+;/)){
 				$barcodelabelsadded++;
 				$id.=";barcodelabel=$name;";
 			}
@@ -389,7 +504,7 @@ sub read_fasta {
 		} else { die "Couldn't read fasta format in $fapathin" };
 	}
 	close $fa_in;
-	print "File $fapathin missing barcode labels, \";barcodelabel=$name;\" appended to header of $barcodelabelsadded sequences\n" if $barcodelabelsadded and $verbose;
+	print "File $fapathin missing barcode labels, \";barcodelabel=$name;\" appended to header of $barcodelabelsadded sequences\n" if $checklabel and $barcodelabelsadded and $verbose;
 	return %fasta;
 }
 
