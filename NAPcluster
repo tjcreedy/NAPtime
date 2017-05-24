@@ -12,21 +12,25 @@ use POSIX;
 use LWP::Simple;
 use Parallel::ForkManager;
 use Sys::Hostname;
+use Time::HiRes qw(time);
 
 ####Dev####
 use Data::Dumper;
+use Storable;
+use File::Slurp qw(read_file write_file);
 
 my $version = "0.3.2"; #22/5/17
 
 my $help;
 my $outpath;
 my %parameters;
+my $doblast;
 my %blastparams =(
 	blasthits => 25,
-	assignsens => 0.25
+	assignsens => 0.4
 );
 my $mode;
-my $threads = 1;
+our $threads = 1;
 our $verbose;
 
 my $script = basename($0,());
@@ -56,6 +60,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "blastpath=s"	=> \$blastparams{blastpath},
 	   "blasthits=s"	=> \$blastparams{blasthits},
 	   "assignsens=s"	=> \$blastparams{assignsens},
+	   "doblast"		=> \$doblast,
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
@@ -110,23 +115,20 @@ my @params = keys %parameters;
 
 if($parameters{filter_chimeras} eq 'both'){
 	$parameters{filter_chimeras} = "yes,no";
+	warn "\nWarning: cluster_method \"swarm\" does no chimera filtering\n" if $parameters{cluster_method} =~ /swarm/;
 }elsif($parameters{filter_chimeras} eq 'no'){
-	warn "\nWarning: cluster method \"swarm\" does no chimera filtering, it is advisable to use \"--filter_chimeras yes\"\n\n" if $parameters{cluster_method} eq "swarm";
-}elsif($parameters{filter_chimeras} ne 'yes'){
+	warn "\nWarning: cluster method \"swarm\" does no chimera filtering, it is advisable to use a different option\n\n" if $parameters{cluster_method} =~ /swarm/;
+}elsif($parameters{filter_chimeras} ne 'swarm' and $parameters{filter_chimeras} ne 'yes'){
 	die "Error: value $parameters{filter_chimeras} passed to --filter_chimeras not recognised\n";
 }
-
-print "\nParameters parsed successfully, mode is \"$mode\"\n" if $verbose;
-
 
 #
 # Set up parameter iterations
 #
-my $iterations = parse_parameters($mode,\%parameters);
+my ($iterations,$n_discarded) = parse_parameters($mode,\%parameters);
 my @n_iter = sort keys %$iterations;
 
-printf "%d iterations successfully parsed\n\n",$#n_iter+1 if($verbose and $#n_iter>0);
-
+printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded removed for non-integer otu assignment parameter for swarm" : "" if($verbose and $#n_iter>0);
 
 my %log;
 my %otusets;
@@ -148,7 +150,7 @@ foreach my $file (@files){
 	@allfasta{keys %fasta} = values %fasta;
 }
 
-#	printf "Concatenation has %d sequences\n", scalar keys %allfasta;
+	printf "Concatenation of %d files has %d sequences\n", scalar @files, scalar keys %allfasta;
 #	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
 
 #
@@ -170,12 +172,12 @@ $pm->run_on_finish( sub {
 print "Starting clustering\n" if $verbose and $mode eq "batch";
 printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+1) if $verbose and $mode eq "eval";
 
-foreach my $iter (@n_iter){;
+foreach my $iter (keys %$iterations){;
 	my $pid = $pm->start and next;
 	
 	my ($log,$otus) = group_sort_and_cluster(\%allfasta,$iterations,$iter,\@params,\%stats);
 	
-	$pm->finish(0, {log => $log, otus => $otus, line => $iter});
+	$pm->finish(0, {log => $log, otus => $otus, iter => $iter});
 }
 
 $pm->wait_all_children;
@@ -184,37 +186,38 @@ print "\n";
 #
 # Process otus
 #
+if($doblast){
+	print "BLASTing OTUs across all iterations and making best-guess taxonomies\n";
 
-print "BLASTing OTUs across all iterations and making best-guess taxonomies\n";
-
-my %allotuseqs;
-foreach my $iter (keys %otusets){
-	foreach my $seq (keys %{$otusets{$iter}}){
-		push(@{$allotuseqs{$seq}},"$iter,$otusets{$iter}{$seq}");
+	my %allotuseqs;
+	foreach my $iter (keys %otusets){
+		foreach my $seq (keys %{$otusets{$iter}}){
+			push(@{$allotuseqs{$seq}},"$iter,$otusets{$iter}{$seq}");
+		}
 	}
-}
 
-my %seqstoblast;
-@seqstoblast{0..scalar keys %allotuseqs} = keys %allotuseqs;
+	my %seqstoblast;
+	@seqstoblast{1..scalar keys %allotuseqs} = keys %allotuseqs;
 
-my %taxonomies = batch_taxonomyblast(\%seqstoblast,\%blastparams);
-
-open my $taxout, '>', "$outpath/cluster.otus.taxonomy.txt";
-print $taxout "iteration,otu_id,duplicate,taxonomy_lineage\n";
-foreach my $id (keys %seqstoblast){
-	my @duplicates = @{$allotuseqs{$seqstoblast{$id}}};
-	foreach my $i (0..$#duplicates){
-		print $taxout "$duplicates[$i],$i",join(";",@{$taxonomies{$id}}),"\n";
+	my $taxonomies = batch_taxonomyblast(\%seqstoblast,\%blastparams);
+	print Dumper $taxonomies;
+	my $taxonomypath = "$outpath/cluster.otus.taxonomy.txt";
+	open my $taxout, '>', $taxonomypath;
+	print $taxout "iteration,otu_id,duplicate,taxonomy_lineage,nhits\n";
+	foreach my $id (keys %seqstoblast){
+		my @duplicates = @{$allotuseqs{$seqstoblast{$id}}};
+		foreach my $i (0..$#duplicates){
+			print $taxout "$duplicates[$i],$i,",join(";",@{${$taxonomies}{$id}{bgt}}),",${$taxonomies}{$id}{nhits}\n";
+		}
 	}
+	close $taxout;
+	print "Completed, taxonomies written to $taxonomypath\n";
 }
-
-
-
 #
 # Output results log
 #
-
-open my $logcsv, '>', "$outpath/cluster.$mode.log.csv";
+my $logpath = "$outpath/cluster.$mode.log.csv";
+open my $logcsv, '>',$logpath ;
 
 my @head = (@{$stats{general}},@params,@{$stats{group}},@{$stats{cluster}});
 
@@ -227,73 +230,22 @@ foreach my $i (keys %log){
 close $logcsv;
 
 print "\nCleaning temporary files\n" if $verbose;
-system "rm -rd $outpath/temp";
+#system "rm -rd $outpath/temp";
 
-print "\nCSV log successfully written to $outpath/cluster.$mode.log.csv\n" if $verbose;
-
-##TODO: implement swarm and associated functions
-
+print "\nCSV log successfully written to $logpath\n" if $verbose;
 
 exit;
 
-sub batch_taxonomyblast{
-	my ($queryhash,$parameters) = @_;
-	my $querypath = "tempblastfasta.fa";
-	my @ids = keys %$queryhash;
-	my %out;
-	
-	# output fasta
-	open my $ofa, '>', "temp.fa";
-	foreach my $id (keys %$queryhash){
-		print $ofa ">$id\n${$queryhash}{$id}\n";
-	}
-	close $ofa;
-	
-	# blast
-	my $blastcmd = "blastn -query $querypath -db ${$parameters}{blastpath} -num_threads ${$parameters}{blastthreads} -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 sacc bitscore\"";
-	my $blastdump;
-	my $blasttries = 0;
-	while(!$blastdump && $blasttries<5){
-		$blasttries++;
-		print "blasting $blasttries\n";
-		$blastdump = qx(bash -c '$blastcmd');
-	}
-	
-	if($blastdump){
-		print "Retrieving taxonomy information\n";
-		my @accessions = ($blastdump =~ /(?:^|\n)(\w+)/g);
-		my $accessionstring = join ",",@accessions;
-		my $nucdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta");
-		my $taxidstring = join ",",($nucdump =~ /<TSeq_taxid>(.*)<\/TSeq_taxid/g);
-		my $taxdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
-		my @lineages = ($taxdump =~ /<Lineage>(.*)<\/Lineage>/g);
-		foreach my $n (0..$#ids){
-			my @linaoa;
-			my $min = $n*${$parameters}{blasthits};
-			my $max = ($n+1)*${$parameters}{blasthits}-1;
-			foreach my $i ($min..$max){
-				push @linaoa,[ split /;\s/,$lineages[$i] ];
-			}
-			my $ti = -1;
-			my @htind = (1..$#linaoa);
-			while($ti < scalar @{$linaoa[0]}-1){
-				$ti++;
-				@htind = grep { $linaoa[$_][$ti] =~ $linaoa[0][$ti] } @htind;
-				$ti-- and last if($#htind/$#linaoa <= ${$parameters}{assignsens});
-			}
-			$out{$ids[$n]} = [ @{$linaoa[0]}[0..$ti] ];
-		}
-	}
-	
-	system("rm $querypath");
-	return \%out;
-}
-
 sub group_sort_and_cluster{
 	my ($allfasta,$iterations,$iter,$params,$stats) = @_;
+	
 	my %log;
 	
-	printf "\nClustering iteration $iter of %d\n",scalar keys %$iterations if $verbose;
+	printf "%s: starting iteration $iter of %d with pid $$\n",timestamp(),scalar keys %$iterations if $verbose;
+	my $printstring = join "", ($threads>1 and scalar keys %$iterations>1) ? " pid $$" : "" , scalar keys %$iterations>1 ? " iteration $iter" : "";
+	
+	#print Dumper ${$iterations}{$iter};
+	
 	#
 	# Prepare paths
 	#
@@ -308,46 +260,67 @@ sub group_sort_and_cluster{
 	my $ucpath = $pathroot."map.uc";
 	my $mappath = $pathroot."map.csv";
 	
+	my $errormessage = "You may want to try running with fewer threads, and check that this directory has plenty of space available";
+	
 	#
 	# Write all sequences greater than minlength for later mapping
 	#
 	my $minlength_discarded;
-	
+	my $allreads_written;
 	open my $allout, '>', $allreadspath or die "Error writing to $allreadspath\n";
 	
 	foreach my $id (keys %$allfasta){
 		if(length(${$allfasta}{$id})>=${$iterations}{$iter}{minlength}){
 			print $allout ">$id\n${$allfasta}{$id}\n";
+			$allreads_written++;
 		} else {
 			$minlength_discarded++;
 		}
 	}
 	close $allout;
 	
-	print "Discarded $minlength_discarded sequences for being too short\n";
+
+	print timestamp(),":$printstring discarded $minlength_discarded sequences <${$iterations}{$iter}{minlength}bp, remaining $allreads_written written to $allreadspath\n" if $verbose;
 	
 	#
-	# Group all sequences
+	# Group all sequences ##TODO: if there are greater than n sequences in the allreads file, do multiple dereplications then dereplicate the outputs.
 	#
-	print "Dereplicating all sequences longer than ${$iterations}{$iter}{minlength}bp\n" if $verbose;
+	print timestamp(),":$printstring starting dereplicating\n" if $verbose;
 	
 	my $derep_cmd = "usearch80 -derep_fulllength $allreadspath -fastaout $dereppath -sizeout 2>&1";
 #	print "Command: $derep_cmd\n";
 	my $derep_log = `$derep_cmd`;
-#	print "Log:\n$derep_log\n";
-	$derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s;
-	my ($inputseqs,$ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5,$6);
+	my ($inputseqs,$ngroup,$singletons,$minsize,$topsize,$mean_groupsize);
+	if($derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s){
+		($inputseqs,$ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5,$6);
+	} elsif ($derep_log =~ /Memory limit of 32-bit process exceeded/) {
+		die "ERROR: $printstring usearch80 -derep_fulllength exceeded memory limit and failed. $errormessage\n";
+	} elsif ($derep_log =~ /Fatal error/){
+		die "ERROR: $printstring usearch80 -derep_fulllength failed for an unknown reason, full log follows: $derep_log\n$errormessage\n";
+	} else {
+		warn "WARNING: $printstring usearch80 -derep_fulllength failed to parse output for some reason, and probably failed to run properly entirely\n";
+	}
+	
+	print timestamp(),":$printstring completed dereplication, $ngroup groups written to $dereppath\n" if $verbose;
 	
 	#
 	# Sort by size 
 	#
+	print timestamp(),":$printstring starting sorting and discarding groups <${$iterations}{$iter}{minsize} members\n" if $verbose;
+	
 	my $sort_cmd = "usearch80 -sortbysize $dereppath -fastaout $sortpath -minsize ${$iterations}{$iter}{minsize} 2>&1";
 	my $sort_log = `$sort_cmd`;
-	$sort_log =~ /\s(\d+)\ssequences/;
-	my $n_groups_remain = $1;
+	my $n_groups_remain;
+	if($sort_log =~ /\s(\d+)\ssequences/){
+		$n_groups_remain = $1;
+	} elsif ($sort_log =~ /Fatal error/){
+		die "ERROR: $printstring usearch80 -sortbysize failed with an error, full log follows: $sort_log\n$errormessage\n";
+	} else {
+		warn "WARNING: $printstring usearch80 -sortbysize failed to parse output for some reason, and probably failed to run properly entirely\n";
+	}
 	my $minsize_discarded = $ngroup-$n_groups_remain;
 	
-	print "$minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long, $inputseqs sequences dereplicated into $ngroup groups, of which $minsize_discarded discarded for having fewer than ${$iterations}{$iter}{minsize} members: clustering $n_groups_remain unique sequences\n" if $verbose;
+	print timestamp(),":$printstring discarded $minsize_discarded groups, $n_groups_remain remain, written to $sortpath\n" if $verbose;
 	
 	#
 	# Do logging
@@ -361,8 +334,11 @@ sub group_sort_and_cluster{
 	#
 #	open my $fh, '>', "temp.txt";
 		
-	my ($n_chimeras_uchime,$clusterinput) = ("NA",$sortpath);
-	if(${$iterations}{$iter}{filter_chimeras} eq "yes"){
+	my $n_chimeras_uchime = "NA";
+	my $clusterinput = $sortpath;
+	if(${$iterations}{$iter}{filter_chimeras} eq "yes" or ${$iterations}{$iter}{filter_chimeras} eq "swarm"){
+		print timestamp(),":$printstring filtering chimeras\n" if $verbose;
+		
 		my $chimera_cmd = "usearch80 -uchime_denovo $sortpath -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
 #		print "Command: $chimera_cmd\n";
 		my $chimera_log = `$chimera_cmd`;
@@ -373,35 +349,44 @@ sub group_sort_and_cluster{
 		$n_chimeras_uchime = $1;
 #		print "uchime chimeras: $1\n";
 		$clusterinput = $nonchimerapath;
+		
+		print timestamp(),":$printstring completed filtering $n_chimeras_uchime chimeras, written to $nonchimerapath\n" if $verbose;
 	}
 	
 	my ($nOTUs,$n_chimeras_cluster);
-	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
+	if (${$iterations}{$iter}{otuassign} == 0){
+		print timestamp(),":$printstring clustering skipped because assignment value is 0\n" if $verbose;
+		system("cp $clusterinput $otuspath");
+		($nOTUs,$n_chimeras_cluster) = ($n_groups_remain-{${$iterations}{$iter}{filter_chimeras} eq "yes"  ? 0 : $n_chimeras_uchime},"NA");
+	} else {
+		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{otuassign} on file $clusterinput\n" if $verbose;
+		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
-		my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassign} 2>&1";
-#		print "Command: $cluster_cmd\n";
-		my $cluster_log = `$cluster_cmd`;
-#		print $fh $cluster_log,"\n";
-#		print "Log:\n$cluster_log\n";
-		$cluster_log =~ /.*\s(\d+)\sOTUs,\s(\d+)\schimeras/s; #.* at beginning of regex ensures last OTU and chimera values selected (the function prints multiple lines of progress using \r!)
-#		print "cluster chimeras: $2\n";
-		($nOTUs,$n_chimeras_cluster) = ($1,$2);
-	} elsif(${$iterations}{$iter}{cluster_method} = "swarm"){
+			my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassign} 2>&1";
+	#		print "Command: $cluster_cmd\n";
+			my $cluster_log = `$cluster_cmd`;
+	#		print $fh $cluster_log,"\n";
+	#		print "Log:\n$cluster_log\n";
+			$cluster_log =~ /.*\s(\d+)\sOTUs,\s(\d+)\schimeras/s; #.* at beginning of regex ensures last OTU and chimera values selected (the function prints multiple lines of progress using \r!)
+	#		print "cluster chimeras: $2\n";
+			($nOTUs,$n_chimeras_cluster) = ($1,$2);
+		} elsif(${$iterations}{$iter}{cluster_method} = "swarm"){
 		
-		my @bases = ('A','C','T','G');
-		my $randbase = $bases[int(rand(4))];
-		my $sed_cmd = "sed -i -e'/^>/ ! s/N/$randbase/g' $clusterinput";
-		print $sed_cmd,"\n";
-		system($sed_cmd);
-		my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{otuassign} -w $otuspath $clusterinput 2>&1";
-		print $cluster_cmd,"\n";
-		my $cluster_log = `$cluster_cmd`;
-		print $cluster_log,"\n";
-		$cluster_log =~ /Number\sof\sswarms:\s+(\d+)/;
-		($nOTUs,$n_chimeras_cluster) = ($1,"NA");
+			my @bases = ('A','C','T','G');
+			my $randbase = $bases[int(rand(4))];
+			my $sed_cmd = "sed -i -e'/^>/ ! s/N/$randbase/g' $clusterinput";
+	#		print $sed_cmd,"\n";
+			system($sed_cmd);
+			my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{otuassign} -w $otuspath $clusterinput 2>&1";
+			print $cluster_cmd,"\n";
+			my $cluster_log = `$cluster_cmd`;
+			print $cluster_log,"\n";
+			$cluster_log =~ /Number\sof\sswarms:\s+(\d+)/;
+			($nOTUs,$n_chimeras_cluster) = ($1,"NA");
+		}
 	}
 #	close $fh;
-	print "Clustering using method \"${$iterations}{$iter}{cluster_method}\" completed successfully, $nOTUs otus found\n" if $verbose;
+	print timestamp(),":$printstring completed clustering, $nOTUs OTUs written to $otuspath\n" if $verbose;
 	
 	#
 	# Read OTUs to hash for output
@@ -413,28 +398,254 @@ sub group_sort_and_cluster{
 	#
 	# Map OTUs
 	#
+	
 	my $idpc;
-	if(${$iterations}{$iter}{cluster_method} eq "usearch"){
+	if(${$iterations}{$iter}{otuassign} == 0){
+		$idpc=0.99
+	} elsif(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		$idpc=1-(${$iterations}{$iter}{otuassign}/100);
 	} else {
 		$idpc = 0.97;
 	}
+	print timestamp(),":$printstring starting mapping all reads to OTUs using id $idpc\n" if $verbose;
 	my $mapcmd = "usearch80 -usearch_global $allreadspath -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1";
 #	print "Command: $mapcmd\n";
 	my $maplog=`$mapcmd`;
 #	print "Log:\n$maplog\n";
 	convert_uc_and_write($ucpath,$mappath);
 	
+	print timestamp(),":$printstring completed mapping, map written to $mappath\n" if $verbose;
+	
 	#
 	# Final logging and output
 	#
-	print "Reads successfully mapped to OTUs\n" if $verbose;
-	if($mode eq 'batch'){
-		system("mv $otuspath $outpath/otus_iteration$iter.fa");
-		system("mv $mappath $outpath/map_iteration$iter.csv");
-	}
+	system("mv $otuspath $outpath/otus_iteration$iter.fa");
+	system("mv $mappath $outpath/map_iteration$iter.csv");
+	
 	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster);
+	print timestamp(),":$printstring completed\n" if $verbose;
+	system("rm $allreadspath");
 	return (\%log,\%otus_rev);
+}
+
+sub batch_taxonomyblast{
+	my ($queryhash,$parameters) = @_;
+	my $querypath = "tempblastfasta.fa";
+	my @ids = keys %$queryhash;
+	my %out;
+	my $maxcalls = 200;
+	# output fasta
+	open my $ofa, '>', $querypath;
+	foreach my $id (keys %$queryhash){
+		print $ofa ">$id\n${$queryhash}{$id}\n";
+	}
+	close $ofa;
+	
+	# blast
+	printf "%d sequences to BLAST, this %s\n",scalar @ids, scalar @ids/${$parameters}{blastthreads}>6 ? scalar @ids/${$parameters}{blastthreads}>12 ? "will take some time" : "may take some time" : "won't take too long";
+	my $blastcmd = "blastn -query $querypath -db ${$parameters}{blastpath} -num_threads ${$parameters}{blastthreads} -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 qseqid sacc bitscore\"";
+	my $blastdump;
+	my $blasttries = 0;
+	while(!$blastdump && $blasttries<5){
+		$blasttries++;
+		$blastdump = qx(bash -c '$blastcmd');
+	}
+#	open my $bd, '>', "blastdump.txt";
+#	print $bd $blastdump;
+#	close $bd;
+	if($blastdump){
+		print "Retrieving taxonomy information\n";
+		my ($hits,$accessions) = parse_blastdump($blastdump);
+		my $eutil_calls = ceil(scalar @$accessions/$maxcalls);
+		printf "%d hits to retrieve data for, this will take at least %d seconds\n",scalar @$accessions, $eutil_calls;
+		foreach my $call (1..$eutil_calls){
+			my $starttime = time;
+			my $min = ($call-1)*$maxcalls;
+			my $max = $call*$maxcalls-1;
+			$max = $max>$#{$accessions} ? $#{$accessions} : $max;
+			print "eutil call $call for hits $min to $max...";
+			my $accessionstring = join ",",@{$accessions}[$min..$max];
+			my $nucdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta");
+			my ($taxids,$taxidstring) = parse_nucdump($nucdump);
+			my $taxdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
+			my $lineages = parse_taxdump($taxdump);
+			$hits = merge_data($hits,$taxids,$lineages);
+			my $duration = time - $starttime;
+			print "took $duration seconds\n";
+			sleep (0.7-$duration) if ($duration<0.7); #ensures the frequency of eutil requests is lower than 3 per second, as recommended by NCBI.
+		}
+		store $hits, "hithashstore.log";
+		print "Data retrieved, processing and making best guesses\n";
+		foreach my $qid (@ids){
+			if(!exists(${$hits}{$qid})){
+				$out{$qid}{nhits} = 0;
+				$out{$qid}{bgt} = ["NA"];
+				next;
+			}
+#			print "otu $qid ";
+			my @linaoa;
+			foreach my $acc (keys %{${$hits}{$qid}}){
+				push @linaoa,[ split /;\s/,${$hits}{$qid}{$acc}{lineage} ];
+				$out{$qid}{nhits}++;
+			}
+			
+			my @matchi = ((1) x scalar @linaoa);
+			my $totalhits = scalar @linaoa;
+			my $maxlength = max( map { $#{$_} } @linaoa );
+			my $outi = $maxlength;
+			foreach my $ti (0..$maxlength){
+				printf "run comparison for taxon $ti of %d lineages with maxlength of $maxlength taxa\n", scalar @linaoa;
+				#print Dumper \@linaoa;
+				my @testarray = map {$linaoa[$_][$ti]} (0..$#linaoa);
+				{ no warnings 'uninitialized';print join(',',@testarray),"\n";}
+				@matchi = most_frequent_indices(@testarray);
+				print join(',',@matchi),"\n";
+				printf "comparison found %d identical...",sum(@matchi);
+				if(sum(@matchi)/$totalhits <= ${$parameters}{assignsens}){
+					$outi = $ti-1;
+					print "lineages too divergent, ending at taxon $outi\n";
+					last;
+				}
+				
+				print "sufficient similarity, subsetting...";
+				my @nextlinaoa;
+				foreach my $i (0..$#linaoa){
+					push @nextlinaoa,$linaoa[$i] if($linaoa[$i][$ti] and $matchi[$i]);
+				}
+				if(!@nextlinaoa){
+					$outi = $ti;
+					print "no further taxa for remaining lineages, ending at taxon $outi\n";
+					last;
+				}
+				$maxlength = max( map { $#{$_} } @nextlinaoa );
+				printf "%d/$totalhits lineages remain for next comparison, new maxlength of $maxlength\n", scalar @nextlinaoa;
+				@linaoa = @nextlinaoa;
+			}
+			
+			my @ind = grep { $matchi[$_] == 1 } 0..$#matchi;
+			$out{$qid}{bgt} = [ @{$linaoa[$ind[0]]}[0..$outi] ];
+		}
+	}
+	system("rm $querypath");
+#	print Dumper \%out;
+	return \%out;
+}
+
+sub most_frequent_indices{
+	my (@items) = @_;
+	my %count;
+	foreach my $item (@items){
+		$count{$item}++ if($item);
+	}
+#	print Dumper \%count;
+	my $max = max(values %count);
+	my @mfis = map {!defined($_) ? 0 : $count{$_} == $max ? 1 : 0 } @items;
+	return @mfis;
+}
+
+sub merge_data{
+	my ($hits,$taxids,$lineages) = @_;
+	foreach my $qid (keys %$hits){
+		foreach my $acc (keys %{${$hits}{$qid}}){
+			if(exists(${$taxids}{$acc})){
+				my $tid = ${$taxids}{$acc};
+				${$hits}{$qid}{$acc}{tid} = $tid;
+				${$hits}{$qid}{$acc}{lineage} = ${$lineages}{$tid};
+			}
+		}
+	}
+	return $hits;
+}
+
+sub parse_blastdump{
+	my ($blastdump) = @_;
+	my %hits;
+	open my $bd, '<', \$blastdump;
+	my %acchash;
+	while(my $row = <$bd>){
+		chomp $row;
+		my @line = split /\t/, $row;
+		$hits{$line[0]}{$line[1]}{score} = $line[2];
+		$acchash{$line[1]} = 1;
+	}
+	close $bd;
+	my @accessions = keys %acchash;
+	return (\%hits,\@accessions);
+}
+
+sub parse_nucdump{
+	my ($nucdump) = @_;
+	my %tids;
+	open my $nd, '<', \$nucdump;
+	my @taxids;
+	my ($acc,$tid);
+	while(my $row = <$nd>){
+		chomp $row;
+#		print $row," - ";
+		if($row eq "<TSeq>"){
+			($acc,$tid) = (undef,undef);
+#			print "start of section, reset\n";
+		} elsif($row =~ /<TSeq_accver>([^.<]+)[^<]+<\/TSeq_accver>/){
+			$acc = $1;
+#			print "found accession $acc\n";
+		} elsif($row =~ /<TSeq_taxid>(\d+)<\/TSeq_taxid>/){
+			$tid = $1;
+#			print "found tid $tid\n";
+			push @taxids,$tid;
+		} elsif($row eq "<\/TSeq>"){
+			$tids{$acc} = $tid;
+#			print "end of section, placed tid into hash\n"; 
+#		} else {
+#			print "not relevant\n";
+		}
+	}
+	close $nd;
+	my $taxidstring = join(',',@taxids);
+	return (\%tids,$taxidstring);
+}
+
+sub parse_taxdump{
+	my ($taxdump) = @_;
+	my %lins;
+	open my $td, '<', \$taxdump;
+	my ($flag,$tid,$lineage, $species);
+	while(my $row = <$td>){
+		chomp $row;
+#		print $row, " - ";
+		if($row =~ /<Taxon>/){
+			$flag++;
+#			print "entering taxon of level $flag\n";
+		} elsif($row =~ /<TaxId>(\d+)<\/TaxId>/ and $flag == 1){
+			$tid = $1;
+#			print "found taxid $tid\n"
+		} elsif($row =~ /<Lineage>([^<]+)<\/Lineage>/ and $flag == 1){
+			$lineage = $1;
+#			print "found lineage $lineage\n";
+		} elsif($row =~ /<ScientificName>([^<]+)<\/ScientificName>/ and $flag == 1){
+			$species = $1;
+#			print "found lineage $lineage\n";
+		} elsif($row =~/<\/Taxon>/){
+#			print "end of taxon level $flag";
+			$flag--;
+			if($flag == 0){
+#				print "placing lineage into hash for tid and resetting\n";
+				$lins{$tid} = $lineage;
+				$lins{$tid} .= "; $species" if $species;
+				($tid,$lineage,$species) = (undef,undef,undef);
+#			} else {
+#				print "not yet at low enough level to add to hash\n";
+			}
+#		} else {
+#			print "not relevant\n";
+		}
+	}
+	close $td;
+	return \%lins;
+}
+
+sub timestamp{
+my @time = localtime;
+return sprintf "%02d:%02d:%02d",$time[2],$time[1],$time[0];
 }
 
 sub parse_parameters {
@@ -445,7 +656,7 @@ sub parse_parameters {
 	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-]*$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
 		push @paramarray, $param;
-		if($inmode eq "stat" or $inmode eq "batch"){
+		if($inmode eq "batch"){
 			push @itarray, [$inparams->{$param}];
 		} elsif ($inmode eq "eval"){
 			if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
@@ -474,12 +685,24 @@ sub parse_parameters {
 	my @allarray;
 	
 	NestedLoops(\@itarray, sub {push @allarray, [ @_ ]});
-	
+#	print Dumper \@allarray;
+	my $nonint_removed;
 	my %iterhash;
 	foreach my $it (0 .. $#allarray){
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
+		if($iterhash{$it+1}{cluster_method} eq "swarm" and $iterhash{$it+1}{otuassign} =~ /\./){
+			delete($iterhash{$it+1});
+			$nonint_removed++;
+		}
 	}
-	return \%iterhash;
+	my $newid = 1;
+	my %newhash;
+	foreach my $oldid (keys %iterhash){
+		$newhash{$newid} = $iterhash{$oldid};
+		$newid++
+	}
+#	print Dumper \%iterhash;
+	return (\%newhash,$nonint_removed);
 }
 
 sub read_fasta {
