@@ -87,7 +87,7 @@ my @files=@ARGV;
 # Check for blast database and arrange threads
 #
 
-if(!$blastparams{blastpath}){
+if(!$blastparams{blastpath} and $doblast){
 	my $host = hostname;
 	my %paths = (
 		'ctag' => '/dh/blastdb/nt',
