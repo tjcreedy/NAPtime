@@ -29,7 +29,7 @@ my %blastparams =(
 	blasthits => 25,
 	assignsens => 0.4
 );
-my $maxderepseqs = 500000;
+my $maxderepseqs = 5000;
 my $mode;
 our $threads = 1;
 our $verbose;
@@ -488,59 +488,63 @@ sub write_and_dereplicate{
 	print timestamp(),":$printstring discarded $minlength_discarded sequences <${minl}bp, remaining $allreads_written written to $allreadspath\n" if $verbose;
 	
 	#
-	# Group all sequences ##TODO: if there are greater than n sequences in the allreads file, do multiple dereplications then dereplicate the outputs.
+	# Group all sequences 
 	#
 	print timestamp(),":$printstring starting dereplicating\n" if $verbose;
 	
-	my $to_derep;
 	my $derep_cmd;
-	if ($allreads_written>$maxderepseqs){
-		$to_derep = $pathroot."partderep_minl$minl.fa";
-		unlink("$to_derep");
-		my $derep_iterations = ceil($allreads_written/$maxderepseqs);
-		print timestamp(),":$printstring too many sequences ($allreads_written) for single dereplication (max $maxderepseqs), running in $derep_iterations iterations\n" if $verbose;
-		foreach my $it (1..$derep_iterations){
-			print timestamp(),":$printstring starting dereplication iteration $it\n" if $verbose;
-			my $linemin = 2*$maxderepseqs*($it-1)+1;
-			my $linemax = 2*$maxderepseqs*$it;
-			my $tempin = $pathroot."allreads_minl$minl\_$it.fa";
-			my $tempout = $pathroot."derep_minl$minl\_$it.fa";
-			my $subcmd = "sed -n $linemin,$linemax"."p $allreadspath > $tempin";
-			system("$subcmd");
-			my $derep_cmd = "usearch80 -derep_fulllength $tempin -fastaout $tempout -sizeout 2>&1";
-#			print "Command: $derep_cmd\n";
-			my $derep_log = `$derep_cmd`;
-#			print $derep_log;
-			if ($derep_log =~ /Memory limit of 32-bit process exceeded/) {
-				die "ERROR: $printstring usearch80 -derep_fulllength exceeded memory limit and failed. $errormessage\n";
-			} elsif ($derep_log =~ /Fatal error/){
-				die "ERROR: $printstring usearch80 -derep_fulllength failed for an unknown reason, full log follows: $derep_log\n$errormessage\n";
-			} elsif(!$derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s){ # regex without the -sizein option
-				warn "WARNING: $printstring usearch80 -derep_fulllength failed to parse output for some reason, and probably failed to run properly entirely\n";
-			}
-			system("cat $tempout >> $to_derep");
-			#system("rm $tempin $tempout");
-		}
-		print timestamp(),":$printstring completed $derep_iterations iterations, running final dereplication across all samples\n" if $verbose;
-		$derep_cmd = "usearch80 -derep_fulllength $to_derep -fastaout $dereppath -sizein -sizeout 2>&1";
-	} else {
-		$to_derep = $allreadspath;
-		$derep_cmd = "usearch80 -derep_fulllength $to_derep -fastaout $dereppath -sizeout 2>&1";
-	}
-	
-#	print "Command: $derep_cmd\n";
-	my $derep_log = `$derep_cmd`;
-#	print "Log:\n$derep_log\n";
-
 	my ($ngroup,$singletons,$minsize,$topsize,$mean_groupsize);
-	if($derep_log =~ /\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+))/s){ #regex with the sizein option
+	$derep_cmd = "usearch80 -derep_fulllength $allreadspath -fastaout $dereppath -sizeout 2>&1";
+	my $derep_log = `$derep_cmd`;
+	if($derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s){ #regex without the sizein option
 		($ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
-	} elsif ($derep_log =~ /Memory limit of 32-bit process exceeded/) {
-		die "ERROR: $printstring usearch80 -derep_fulllength exceeded memory limit and failed. $errormessage\n";
-	} elsif ($derep_log =~ /Fatal error/){
-		die "ERROR: $printstring usearch80 -derep_fulllength failed for an unknown reason, full log follows: $derep_log\n$errormessage\n";
 	} else {
-		warn "WARNING: $printstring usearch80 -derep_fulllength failed to parse output for some reason, and probably failed to run properly entirely\n";
+		undef $derep_log;
+		print timestamp(),":$printstring initial dereplication failed, likely for too many sequences, attempting iterative dereplication mode\n" if $verbose;
+		my $derep_loop_in = $allreadspath;
+		my $derep_loop_out;
+
+		my $loop;
+		
+		while(!$derep_log){
+			$loop++;
+			my $nseqs = `cat $derep_loop_in | grep -c '^>'`;
+			my $derep_iterations = ceil($nseqs/$maxderepseqs);
+			$derep_loop_out = $pathroot."partderep_minl${minl}_$loop.fa";
+			unlink("$derep_loop_out") if $loop==1;
+			foreach my $it (1..$derep_iterations){
+				print timestamp(),":$printstring starting dereplication iteration $loop-$it\n" if $verbose;
+				my $linemin = 2*$maxderepseqs*($it-1)+1;
+				my $linemax = 2*$maxderepseqs*$it;
+				my $tempin = $pathroot."allreads_minl$minl\_$it.fa";
+				my $tempout = $pathroot."derep_minl$minl\_$it.fa";
+				my $subcmd = "sed -n $linemin,$linemax"."p $allreadspath > $tempin";
+				system("$subcmd");
+				my $derep_cmd = "usearch80 -derep_fulllength $tempin -fastaout $tempout -sizein -sizeout 2>&1";
+	#			print "Command: $derep_cmd\n";
+				my $derep_log = `$derep_cmd`;
+	#			print $derep_log;
+				if ($derep_log =~ /Memory limit of 32-bit process exceeded/) {
+					die "ERROR: $printstring usearch80 -derep_fulllength exceeded memory limit and failed. $errormessage\n";
+				} elsif ($derep_log =~ /Fatal error/){
+					die "ERROR: $printstring usearch80 -derep_fulllength failed for an unknown reason, full log follows: $derep_log\n$errormessage\n";
+				} elsif(!$derep_log =~ /\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+))/s){ # regex with the -sizein option
+					warn "WARNING: $printstring usearch80 -derep_fulllength failed to parse output for some reason, and probably failed to run properly entirely\n";
+				}
+				system("cat $tempout >> $derep_loop_out");
+				system("rm $tempin $tempout");
+			}
+			print timestamp(),":$printstring completed $derep_iterations iterations, running final dereplication across all samples\n" if $verbose;
+			$derep_cmd = "usearch80 -derep_fulllength $derep_loop_in -fastaout $dereppath -sizein -sizeout 2>&1";
+			my $derep_log = `$derep_cmd`;
+			if($derep_log =~ /\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+))/s){ #regex with the sizein option
+				($ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
+			} else {
+				print timestamp(),":$printstring dereplication failed again, likely still too many sequences, running another another set of iterations\n" if $verbose;
+				undef $derep_log;
+				$derep_loop_in = $derep_loop_out;
+			}
+		}
 	}
 	
 	print timestamp(),":$printstring completed dereplication, $ngroup groups written to $dereppath\n" if $verbose;
