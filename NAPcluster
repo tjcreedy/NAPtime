@@ -183,6 +183,7 @@ $dpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$dpm_done++;
 	printf "Completed $dpm_done/%d dereplication iterations\n",scalar @{${$expand_parameters}{minlength}} if $verbose and $mode eq 'eval';
+	die "Error: dereplication thread failed to output\n" unless $data_structure_reference;
 	my $minl = $data_structure_reference->{minl};
 	$derep_log{$minl} = $data_structure_reference->{log};
 });
@@ -216,6 +217,7 @@ $spm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$spm_done++;
 	printf "Completed $spm_done/%d size sorting iterations\n",scalar @{${$expand_parameters}{minlength}}if $verbose and $mode eq 'eval';
+	die "Error: size thread failed to output\n" unless $data_structure_reference;
 	my $minl = $data_structure_reference->{minl};
 	my $mins = $data_structure_reference->{mins};
 	$sort_log{$minl}{$mins} = $data_structure_reference->{log};
@@ -249,6 +251,7 @@ $pm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$done_iterations++;
 	printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1) if $verbose and $mode eq 'eval';
+	die "Error: iteration failed to output\n" unless $data_structure_reference;
 	my $iter = $data_structure_reference->{iter};
 	$cluster_log{$iter} = $data_structure_reference->{log};
 	$otusets{$iter} = $data_structure_reference->{otus};
