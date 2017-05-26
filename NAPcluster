@@ -82,6 +82,7 @@ if(!defined $outpath){
 	make_path("$outpath/temp/");
 	$outpath =~ s/\/$//;
 }
+my $pathroot = "$outpath/temp/cluster.";
 
 my @files=@ARGV;
 
@@ -141,7 +142,7 @@ my %stats = (
 );
 
 #
-# Read in files
+# Read in files then output raw
 #
 print "Reading and concatenating all files\n" if $verbose;
 my %allfasta;
@@ -155,15 +156,18 @@ foreach my $file (@files){
 	printf "Concatenation of %d files has %d sequences\n\n", scalar @files, scalar keys %allfasta;
 #	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
 
+my $allreads_raw = $pathroot."allreads_raw.fa";
+open my $allraw, '>', $allreads_raw;
+foreach my $id (keys %allfasta){
+	print $allraw ">$id\n$allfasta{$id}\n";
+}
+close $allraw;
+
 #
 # Prep for pipeline
 #
 my $input_sequences = scalar keys %allfasta;
-my $pathroot = "$outpath/temp/cluster.";
 my $errormessage = "You may want to try running with fewer threads, and check that this directory has plenty of space available";
-my $allreads_raw = $pathroot."allreads_raw.fa";
-my $catcmd = "cat ".join(' ',@files)." > $allreads_raw";
-system($catcmd);
 
 
 #
@@ -320,7 +324,7 @@ foreach my $i (keys %$iterations){
 close $logcsv;
 
 print "\nCleaning temporary files\n" if $verbose;
-#system "rm -rd $outpath/temp";
+system "rm -rd $outpath/temp";
 
 print "\nCSV log successfully written to $logpath\n" if $verbose;
 
@@ -431,9 +435,9 @@ sub cluster_and_map{
 	}
 	print timestamp(),":$printstring starting mapping all reads to OTUs using id $idpc\n" if $verbose;
 	my $mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1";
-#	print "Command: $mapcmd\n";
+	print "Command: $mapcmd\n";
 	my $maplog=`$mapcmd`;
-#	print "Log:\n$maplog\n";
+	print "Log:\n$maplog\n";
 	convert_uc_and_write($ucpath,$mappath);
 	
 	print timestamp(),":$printstring completed mapping, map written to $mappath\n" if $verbose;
