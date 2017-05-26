@@ -29,6 +29,7 @@ my %blastparams =(
 	blasthits => 25,
 	assignsens => 0.4
 );
+my $maxderepseqs = 500000;
 my $mode;
 our $threads = 1;
 our $verbose;
@@ -60,6 +61,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "blastpath=s"	=> \$blastparams{blastpath},
 	   "blasthits=s"	=> \$blastparams{blasthits},
 	   "assignsens=s"	=> \$blastparams{assignsens},
+	   "maxderepseqs=i"	=> \$maxderepseqs,
 	   "doblast"		=> \$doblast,
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
@@ -187,7 +189,7 @@ printf "Starting %d writing and dereplication iterations using $threads threads 
 foreach my $minl (@{${$expand_parameters}{minlength}}){
 	my $pid = $dpm->start and next;
 	
-	my $log = write_and_dereplicate(\%allfasta,$pathroot,$minl,\%stats,$errormessage);
+	my $log = write_and_dereplicate(\%allfasta,$pathroot,$minl,\%stats,$errormessage,$maxderepseqs);
 	$dpm->finish(0, {log => $log, minl => $minl});
 }
 
@@ -451,7 +453,7 @@ sub cluster_and_map{
 }
 
 sub write_and_dereplicate{
-	my($allfasta,$pathroot,$minl,$stats,$errormessage) = @_;
+	my($allfasta,$pathroot,$minl,$stats,$errormessage,$maxderepseqs) = @_;
 	print timestamp(),": starting iteration minlength $minl with pid $$\n" if $verbose;
 	my %log;
 	my $printstring = join "", $threads>1 ? " pid $$" : "" , " minlength $minl";
@@ -485,7 +487,6 @@ sub write_and_dereplicate{
 	
 	my $to_derep;
 	my $derep_cmd;
-	my $maxderepseqs = 500000;
 	if ($allreads_written>$maxderepseqs){
 		$to_derep = $pathroot."partderep_minl$minl.fa";
 		unlink("$to_derep");
