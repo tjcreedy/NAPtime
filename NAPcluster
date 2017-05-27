@@ -29,7 +29,7 @@ my %blastparams =(
 	blasthits => 25,
 	assignsens => 0.4
 );
-my $maxderepseqs = 5000;
+my $maxderepseqs = 2000000;
 my $mode;
 our $threads = 1;
 our $verbose;
@@ -496,6 +496,7 @@ sub write_and_dereplicate{
 	my ($ngroup,$singletons,$minsize,$topsize,$mean_groupsize);
 	$derep_cmd = "usearch80 -derep_fulllength $allreadspath -fastaout $dereppath -sizeout 2>&1";
 	my $derep_log = `$derep_cmd`;
+	print $derep_log,"\n";
 	if($derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s){ #regex without the sizein option
 		($ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
 	} else {
@@ -503,27 +504,29 @@ sub write_and_dereplicate{
 		print timestamp(),":$printstring initial dereplication failed, likely for too many sequences, attempting iterative dereplication mode\n" if $verbose;
 		my $derep_loop_in = $allreadspath;
 		my $derep_loop_out;
-
+		
 		my $loop;
 		
 		while(!$derep_log){
 			$loop++;
-			my $nseqs = `cat $derep_loop_in | grep -c '^>'`;
-			my $derep_iterations = ceil($nseqs/$maxderepseqs);
-			$derep_loop_out = $pathroot."partderep_minl${minl}_$loop.fa";
-			unlink("$derep_loop_out") if $loop==1;
+			my $ninseqs = `cat $derep_loop_in | grep -c '^>'`;
+			my $derep_iterations = ceil($ninseqs/$maxderepseqs);
+			$derep_loop_out = $pathroot."dereploopsub_minl${minl}_$loop.fa";
+			unlink("$derep_loop_out");
+			
+			print timestamp(),":$printstring dereplication loop $loop on file $derep_loop_in with $ninseqs sequences, concatenating to $derep_loop_out over $derep_iterations iterations\n" if $verbose;
 			foreach my $it (1..$derep_iterations){
-				print timestamp(),":$printstring starting dereplication iteration $loop-$it\n" if $verbose;
 				my $linemin = 2*$maxderepseqs*($it-1)+1;
 				my $linemax = 2*$maxderepseqs*$it;
-				my $tempin = $pathroot."allreads_minl$minl\_$it.fa";
-				my $tempout = $pathroot."derep_minl$minl\_$it.fa";
-				my $subcmd = "sed -n $linemin,$linemax"."p $allreadspath > $tempin";
+				my $tempin = $pathroot."derepitersubin_minl$minl\_$it.fa";
+				my $tempout = $pathroot."derepitersubout_minl$minl\_$it.fa";
+				print timestamp(),":$printstring starting dereplication iteration $loop-$it using lines $linemin to $linemax of $derep_loop_in in temporary file $tempin\n" if $verbose;
+				my $subcmd = "sed -n $linemin,$linemax"."p $derep_loop_in > $tempin";
 				system("$subcmd");
 				my $derep_cmd = "usearch80 -derep_fulllength $tempin -fastaout $tempout -sizein -sizeout 2>&1";
 	#			print "Command: $derep_cmd\n";
 				my $derep_log = `$derep_cmd`;
-	#			print $derep_log;
+				printf "%s\n", (split("\n",$derep_log))[7];
 				if ($derep_log =~ /Memory limit of 32-bit process exceeded/) {
 					die "ERROR: $printstring usearch80 -derep_fulllength exceeded memory limit and failed. $errormessage\n";
 				} elsif ($derep_log =~ /Fatal error/){
@@ -533,15 +536,29 @@ sub write_and_dereplicate{
 				}
 				system("cat $tempout >> $derep_loop_out");
 				system("rm $tempin $tempout");
+				my $ncatseqs = `cat $derep_loop_out | grep -c '^>'`;
+				print timestamp(),":$printstring completed iteration $loop-$it, $tempout concatenated to $derep_loop_out and temporary files deleted\n";
+				
 			}
-			print timestamp(),":$printstring completed $derep_iterations iterations, running final dereplication across all samples\n" if $verbose;
-			$derep_cmd = "usearch80 -derep_fulllength $derep_loop_in -fastaout $dereppath -sizein -sizeout 2>&1";
+			my $noutseqs = `cat $derep_loop_out | grep -c '^>'`;
+			chomp $noutseqs;
+			print timestamp(),":$printstring completed $derep_iterations iterations for loop $loop, running final dereplication on $noutseqs sequences in file $derep_loop_out\n" if $verbose;
+			$derep_cmd = "usearch80 -derep_fulllength $derep_loop_out -fastaout $dereppath -sizein -sizeout 2>&1";
 			my $derep_log = `$derep_cmd`;
+			print $derep_log,"\n";
 			if($derep_log =~ /\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+))/s){ #regex with the sizein option
 				($ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
 			} else {
 				print timestamp(),":$printstring dereplication failed again, likely still too many sequences, running another another set of iterations\n" if $verbose;
 				undef $derep_log;
+				my %tempfa = read_fasta($derep_loop_out);
+				open my $tempout, '>', $derep_loop_out;
+				foreach my $id (keys %tempfa){
+					print $tempout ">$id\n$tempfa{$id}\n";
+				}
+				close $tempout;
+				my $nshufseqs = scalar keys %tempfa;
+				print timestamp(),":$printstring $nshufseqs sequences unwrapped and shuffled from $derep_loop_out, ready for new iteration\n" if $verbose;
 				$derep_loop_in = $derep_loop_out;
 			}
 		}
