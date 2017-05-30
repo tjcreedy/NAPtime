@@ -153,7 +153,7 @@ foreach my $file (@files){
 	@allfasta{keys %fasta} = values %fasta;
 }
 
-	printf "Concatenation of %d files has %d sequences\n\n", scalar @files, scalar keys %allfasta;
+printf "Concatenation of %d files has %d sequences\n\n", scalar @files, scalar keys %allfasta;
 #	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
 
 my $allreads_raw = $pathroot."allreads_raw.fa";
@@ -174,70 +174,110 @@ my $errormessage = "You may want to try running with fewer threads, and check th
 # Do dereplication
 #
 
-my %derep_log;
+# my %derep_log;
 
-my $dpm = Parallel::ForkManager->new($threads);
-my $dpm_done=0;
+# my $dpm = Parallel::ForkManager->new($threads);
+# my $dpm_done=0;
 
-$dpm->run_on_finish( sub {
-	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
-	$dpm_done++;
-	printf "Completed $dpm_done/%d dereplication iterations\n",scalar @{${$expand_parameters}{minlength}} if $verbose and $mode eq 'eval';
-	die "Error: dereplication thread failed to output\n" unless $data_structure_reference;
-	my $minl = $data_structure_reference->{minl};
-	$derep_log{$minl} = $data_structure_reference->{log};
-});
+# $dpm->run_on_finish( sub {
+	# my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	# $dpm_done++;
+	# printf "Completed $dpm_done/%d dereplication iterations\n",scalar @{${$expand_parameters}{minlength}} if $verbose and $mode eq 'eval';
+	# die "Error: dereplication thread failed to output\n" unless $data_structure_reference;
+	# my $minl = $data_structure_reference->{minl};
+	# $derep_log{$minl} = $data_structure_reference->{log};
+# });
 
-print "Starting writing and dereplication\n" if $verbose and $mode eq "batch";
-printf "Starting %d writing and dereplication iterations using $threads threads \n", scalar @{${$expand_parameters}{minlength}} if $verbose and $mode eq "eval";
+# print "Starting writing and dereplication\n" if $verbose and $mode eq "batch";
+# printf "Starting %d writing and dereplication iterations using $threads threads \n", scalar @{${$expand_parameters}{minlength}} if $verbose and $mode eq "eval";
 
-foreach my $minl (@{${$expand_parameters}{minlength}}){
-	my $pid = $dpm->start and next;
+# foreach my $minl (@{${$expand_parameters}{minlength}}){
+	# my $pid = $dpm->start and next;
 	
-	my $log = write_and_dereplicate(\%allfasta,$pathroot,$minl,\%stats,$errormessage,$maxderepseqs);
-	$dpm->finish(0, {log => $log, minl => $minl});
-}
+	# my $log = write_and_dereplicate(\%allfasta,$pathroot,$minl,\%stats,$errormessage,$maxderepseqs);
+	# $dpm->finish(0, {log => $log, minl => $minl});
+# }
 
-$dpm->wait_all_children;
-print "\n";
+# $dpm->wait_all_children;
+# print "\n";
 
-#Can clear allfasta from memory now
-undef %allfasta;
+# Can clear allfasta from memory now
+# undef %allfasta;
 
 #
 # Do sorting by size
 #
 
+# my %sort_log;
+
+# my $spm = Parallel::ForkManager->new($threads);
+# my $spm_done=0;
+
+# $spm->run_on_finish( sub {
+	# my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	# $spm_done++;
+	# printf "Completed $spm_done/%d size sorting iterations\n",scalar @{${$expand_parameters}{minlength}}if $verbose and $mode eq 'eval';
+	# die "Error: size thread failed to output\n" unless $data_structure_reference;
+	# my $minl = $data_structure_reference->{minl};
+	# my $mins = $data_structure_reference->{mins};
+	# $sort_log{$minl}{$mins} = $data_structure_reference->{log};
+# });
+
+# print "Starting size sorting\n" if $verbose and $mode eq "batch";
+# printf "Starting %d size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{minlength}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
+
+# foreach my $minl (@{${$expand_parameters}{minlength}}){
+	# foreach my $mins (@{${$expand_parameters}{minsize}}){
+		# my $pid = $spm->start and next;
+	
+		# my $log = sizesort($pathroot,$mins,$minl,\%stats,$errormessage);
+	
+		# $spm->finish(0, {log => $log, minl => $minl, mins => $mins});
+	# }
+# }
+
+# $spm->wait_all_children;
+# print "\n";
+
+# Do derep and sort onboard
+
+my %derep_log;
 my %sort_log;
 
-my $spm = Parallel::ForkManager->new($threads);
-my $spm_done=0;
+my $bpm = Parallel::ForkManager->new($threads);
+my $bpm_done=0;
 
-$spm->run_on_finish( sub {
+$bpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
-	$spm_done++;
-	printf "Completed $spm_done/%d size sorting iterations\n",scalar @{${$expand_parameters}{minlength}}if $verbose and $mode eq 'eval';
+	$bpm_done++;
+	printf "Completed $bpm_done/%d dereplication and size sorting iterations\n",(scalar @{${$expand_parameters}{minlength}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq 'eval';
 	die "Error: size thread failed to output\n" unless $data_structure_reference;
 	my $minl = $data_structure_reference->{minl};
 	my $mins = $data_structure_reference->{mins};
-	$sort_log{$minl}{$mins} = $data_structure_reference->{log};
+	$sort_log{$minl}{$mins} = $data_structure_reference->{slog};
+	$derep_log{$minl}{$mins} = $data_structure_reference->{dlog};
 });
 
-print "Starting size sorting\n" if $verbose and $mode eq "batch";
-printf "Starting %d size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{minlength}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
+print "Starting dereplication and size sorting\n" if $verbose and $mode eq "batch";
+printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{minlength}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
 
 foreach my $minl (@{${$expand_parameters}{minlength}}){
 	foreach my $mins (@{${$expand_parameters}{minsize}}){
-		my $pid = $spm->start and next;
+		my $pid = $bpm->start and next;
 	
-		my $log = sizesort($pathroot,$mins,$minl,\%stats,$errormessage);
+		my ($dlog,$slog) = derep_sort_write(\%allfasta,$pathroot,$minl,$mins,\%stats);
 	
-		$spm->finish(0, {log => $log, minl => $minl, mins => $mins});
+		$bpm->finish(0, {slog => $slog, dlog => $dlog, minl => $minl, mins => $mins});
 	}
 }
 
-$spm->wait_all_children;
+$bpm->wait_all_children;
 print "\n";
+
+# Can clear allfasta from memory now
+undef %allfasta;
+
+
 
 #
 # Do clustering and mapping pipeline
@@ -318,7 +358,7 @@ foreach my $i (keys %$iterations){
 	my $mins = ${$iterations}{$i}{minsize};
 	print $logcsv "\n$input_sequences,$i,",
 		join(',',@{$cluster_log{$i}}{@params},
-			@{$derep_log{$minl}}{@{$stats{derep}}},
+			@{$derep_log{$minl}{$mins}}{@{$stats{derep}}},
 			@{$sort_log{$minl}{$mins}}{@{$stats{size}}},
 			@{$cluster_log{$i}}{@{$stats{cluster}}}
 			);
@@ -459,6 +499,79 @@ sub cluster_and_map{
 	return (\%log,\%otus_rev);
 }
 
+sub derep_sort_write{
+	my($allfasta,$pathroot,$minl,$mins,$stats) = @_;
+	print timestamp(),": starting dereplication and sort iteration with minlength $minl and minsize $mins, pid $$\n" if $verbose;
+	my %dlog;
+	my %slog;
+	
+	my $printstring = join "", $threads>1 ? " pid $$" : "" , " minlength $minl minsize $mins";
+	
+	my $sortpath = $pathroot."sort_minl$minl\_mins$mins.fa";
+	
+	#
+	# Dereplicate all sequences greater than minlength
+	#
+	my $minlength_discarded = 0;
+	my $minlength_passed = 0;
+	my %dereplicated;
+	foreach my $id (keys %$allfasta){
+		if(length(${$allfasta}{$id})>=$minl){
+			$dereplicated{${$allfasta}{$id}}++;
+			$minlength_passed++;
+		} else {
+			$minlength_discarded++;
+		}
+	}
+	
+	#
+	# Calculate statistics
+	#
+	my @groupsizes = values %dereplicated;
+	my %sizecount;
+	foreach my $size (@groupsizes){
+		$sizecount{$size}++;
+	}
+	my $ngroup = scalar keys %dereplicated;
+	my $singletons  = $sizecount{1} ? $sizecount{1} : 0;
+	my $minsize = min(@groupsizes);
+	my $topsize = max(@groupsizes);
+	my $mean_groupsize = $minlength_passed/$ngroup;
+	
+	@dlog{@{${$stats}{derep}}} = ($minlength_discarded,$minlength_passed,$ngroup,$mean_groupsize,$minsize,$topsize);
+	
+	print timestamp(),":$printstring discarded $minlength_discarded sequences <${minl}bp, $minlength_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
+	
+	#
+	# Output sequences size sorted
+	#
+	my @sorted_seqs = sort { $dereplicated{$b} <=> $dereplicated{$a} } keys %dereplicated;
+	open my $sorted, '>', $sortpath;
+	my $bigenough;
+	foreach my $seq (@sorted_seqs){
+		if($dereplicated{$seq}>=$mins){
+			$bigenough++;
+			print $sorted ">sequence$bigenough;size=$dereplicated{$seq};\n$seq\n";
+		} else {
+			last;
+		}
+	}
+	
+	my $n_groups_remain = $bigenough;
+	my $minsize_discarded = $ngroup - $n_groups_remain;
+	
+	print timestamp(),":$printstring discarded $minsize_discarded groups, $n_groups_remain remain, written to $sortpath\n" if $verbose;
+	
+	@slog{@{${$stats}{size}}} = ($minsize_discarded,$n_groups_remain);
+	
+	return(\%dlog,\%slog);
+}
+
+
+
+
+
+
 sub write_and_dereplicate{
 	my($allfasta,$pathroot,$minl,$stats,$errormessage,$maxderepseqs) = @_;
 	print timestamp(),": starting iteration minlength $minl with pid $$\n" if $verbose;
@@ -469,7 +582,7 @@ sub write_and_dereplicate{
 	my $dereppath = $pathroot."derep_minl$minl.fa";
 	
 	#
-	# Write all sequences greater than minlength for later mapping
+	# Write all sequences greater than minlength
 	#
 	my $minlength_discarded=0;
 	my $allreads_written;
