@@ -29,7 +29,7 @@ my %blastparams =(
 	blasthits => 25,
 	assignsens => 0.4
 );
-my $maxderepseqs = 2000000;
+my $maxmapseqs = 2000000;
 my $mode;
 our $threads = 1;
 our $verbose;
@@ -61,7 +61,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "blastpath=s"	=> \$blastparams{blastpath},
 	   "blasthits=s"	=> \$blastparams{blasthits},
 	   "assignsens=s"	=> \$blastparams{assignsens},
-	   "maxderepseqs=i"	=> \$maxderepseqs,
+	   "maxmapseqs=i"	=> \$maxmapseqs,
 	   "doblast"		=> \$doblast,
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
@@ -303,7 +303,7 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (keys %$iterations){;
 	my $pid = $pm->start and next;
 	
-	my ($log,$otus) = cluster_and_map($allreads_raw,$pathroot,$iterations,$iter,\@params,\%stats);
+	my ($log,$otus) = cluster_and_map($allreads_raw,$pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs);
 	
 	$pm->finish(0, {log => $log, otus => $otus, iter => $iter});
 }
@@ -374,7 +374,7 @@ print "\nCSV log successfully written to $logpath\n" if $verbose;
 exit;
 
 sub cluster_and_map{
-	my ($allreads_raw,$pathroot,$iterations,$iter,$params,$stats) = @_;
+	my ($allreads_raw,$pathroot,$iterations,$iter,$params,$stats,$maxmapseqs) = @_;
 	
 	my %log;
 	
@@ -481,6 +481,33 @@ sub cluster_and_map{
 	print "Command: $mapcmd\n";
 	my $maplog=`$mapcmd`;
 	print "Log:\n$maplog\n";
+	#if($maplog =~ /File\ssize\stoo\sbig/s){
+		undef $maplog;
+		print timestamp(),":$printstring initial mapping failed, likely for too many sequences, attempting iterative dereplication mode\n" if $verbose;
+		my $ninseqs = `cat $allreads_raw | grep -c '^>'`;
+		my $map_iterations = ceil($ninseqs/$maxmapseqs);
+		
+		#print timestamp(),":$printstring maplication loop $loop on file $allreads_raw with $ninseqs sequences, concatenating to $map_loop_out over $map_iterations iterations\n" if $verbose;
+		foreach my $it (1..$map_iterations){
+			my $linemin = 2*$maxmapseqs*($it-1)+1;
+			my $linemax = 2*$maxmapseqs*$it;
+			my $tempin = $pathroot."mapitersubin_$it.fa";
+			my $tempout = $pathroot."mapitersubout_$it.fa";
+			print timestamp(),":$printstring starting mapping iteration $it using lines $linemin to $linemax of $allreads_raw in temporary file $tempin\n" if $verbose;
+			my $subcmd = "sed -n $linemin,$linemax"."p $allreads_raw > $tempin";
+			system("$subcmd");
+			my $map_cmd = "usearch80 -usearch_global $tempin -db $otuspath -strand plus -id $idpc -uc $tempout 2>&1";
+			print "Command: $map_cmd\n";
+			my $maplog = `$map_cmd`;
+			print "Log:\n$maplog\n";
+			printf "%s\n", (split("\n",$maplog))[7];
+			system("tail -n +2 $tempout >> $ucpath");
+			system("rm $tempin $tempout");
+			print timestamp(),":$printstring completed iteration $it, $tempout concatenated to $ucpath and temporary files deleted\n";
+		}
+		print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
+	#}
+	
 	convert_uc_and_write($ucpath,$mappath);
 	
 	print timestamp(),":$printstring completed mapping, map written to $mappath\n" if $verbose;
