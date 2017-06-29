@@ -16,7 +16,7 @@ use Sys::Hostname;
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.3.2"; #22/5/17
+my $version = "0.3.3"; #29/6/17
 
 my $help;
 my $outpath;
@@ -422,7 +422,7 @@ sub read_fasta {
 		chomp $row;
 		if($row =~ /^>(.+)$/){
 			$id = $1;
-		} elsif($row =~ /^[ATCGNatcgn]+$/){
+		} elsif($row =~ /^[ATCGRYSWKMBVDHNatcgryswkmbvdhn]+$/){
 			$fasta{$id} .= $row;
 		} else { die "Couldn't read fasta format in $fapathin" };
 	}
