@@ -486,7 +486,7 @@ sub cluster_and_map{
 	if($maplog =~ /File\ssize\stoo\sbig/s or $debug){
 		undef $maplog;
 		unlink $ucpath;
-		print timestamp(),":$printstring initial mapping failed, likely for too many sequences, attempting iterative dereplication mode\n" if $verbose;
+		print timestamp(),":$printstring initial mapping failed, likely for too many sequences, attempting iterative mapping mode\n" if $verbose;
 		my $ninseqs = `cat $allreads_raw | grep -c '^>'`;
 		my $map_iterations = ceil($ninseqs/$maxmapseqs);
 		
