@@ -24,6 +24,7 @@ my $version = "0.4.1"; #25/5/17
 my $help;
 my $outpath;
 my %parameters;
+our $debug;
 my $doblast;
 my %blastparams =(
 	blasthits => 25,
@@ -65,6 +66,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "doblast"		=> \$doblast,
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
+	   "debug"			=> \$debug,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
 #
@@ -366,8 +368,8 @@ foreach my $i (keys %$iterations){
 
 close $logcsv;
 
-print "\nCleaning temporary files\n" if $verbose;
-system "rm -rd $outpath/temp";
+print "\nCleaning temporary files\n" if $verbose and !$debug;
+system "rm -rd $outpath/temp" unless $debug;
 
 print "\nCSV log successfully written to $logpath\n" if $verbose;
 
@@ -481,8 +483,9 @@ sub cluster_and_map{
 	print "Command: $mapcmd\n";
 	my $maplog=`$mapcmd`;
 	print "Log:\n$maplog\n";
-	#if($maplog =~ /File\ssize\stoo\sbig/s){
+	if($maplog =~ /File\ssize\stoo\sbig/s or $debug){
 		undef $maplog;
+		unlink $ucpath;
 		print timestamp(),":$printstring initial mapping failed, likely for too many sequences, attempting iterative mapping mode\n" if $verbose;
 		my $ninseqs = `cat $allreads_raw | grep -c '^>'`;
 		my $map_iterations = ceil($ninseqs/$maxmapseqs);
@@ -492,21 +495,21 @@ sub cluster_and_map{
 			my $linemin = 2*$maxmapseqs*($it-1)+1;
 			my $linemax = 2*$maxmapseqs*$it;
 			my $tempin = $pathroot."mapitersubin_$it.fa";
-			my $tempout = $pathroot."mapitersubout_$it.fa";
+			my $tempout = $pathroot."mapitersubout_$it.uc";
 			print timestamp(),":$printstring starting mapping iteration $it using lines $linemin to $linemax of $allreads_raw in temporary file $tempin\n" if $verbose;
 			my $subcmd = "sed -n $linemin,$linemax"."p $allreads_raw > $tempin";
 			system("$subcmd");
 			my $map_cmd = "usearch80 -usearch_global $tempin -db $otuspath -strand plus -id $idpc -uc $tempout 2>&1";
-			print "Command: $map_cmd\n";
+			print "Command: $map_cmd\n" if $debug;
 			my $maplog = `$map_cmd`;
-			print "Log:\n$maplog\n";
+			print "Log:\n$maplog\n" if $debug;
 			printf "%s\n", (split("\n",$maplog))[7];
 			system("cat $tempout >> $ucpath");
-			system("rm $tempin $tempout");
+			system("rm $tempin $tempout") unless $debug;
 			print timestamp(),":$printstring completed iteration $it, $tempout concatenated to $ucpath and temporary files deleted\n";
 		}
 		print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
-	#}
+	}
 	
 	convert_uc_and_write($ucpath,$mappath);
 	
@@ -675,7 +678,7 @@ sub write_and_dereplicate{
 					warn "WARNING: $printstring usearch80 -derep_fulllength failed to parse output for some reason, and probably failed to run properly entirely\n";
 				}
 				system("cat $tempout >> $derep_loop_out");
-				system("rm $tempin $tempout");
+				system("rm $tempin $tempout") unless $debug;
 				my $ncatseqs = `cat $derep_loop_out | grep -c '^>'`;
 				print timestamp(),":$printstring completed iteration $loop-$it, $tempout concatenated to $derep_loop_out and temporary files deleted\n";
 				
@@ -1057,7 +1060,7 @@ sub convert_uc_and_write {
 	open my $uc, '<', $ucpath or die "Error opening $ucpath\n";
 	while(my $row = <$uc>){
 		chomp $row;
-		if($row =~ /H.*barcodelabel=(\w+);\t(.*)$/){
+		if($row =~ /H.*barcodelabel=([^;]+);\t(.*)$/){
 			$tab{$1}{$2}++;
 			$samples{$1}=1;
 			$otus{$2}=1;
