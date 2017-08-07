@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.4.1"; #25/5/17
+my $version = "0.4.2"; #07/08/17
 
 my $help;
 my $outpath;
@@ -139,7 +139,7 @@ my ($iterations,$expand_parameters,$n_discarded) = parse_parameters($mode,\%para
 my @n_iter = sort keys %$iterations;
 
 print "Debug: parsed iteration hash follows:" if $debug;
-print Dumper \$iterations;
+print Dumper \$iterations if $debug;
 
 printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded removed for non-integer otu assignment parameter for swarm" : "" if($verbose and $#n_iter>0);
 
