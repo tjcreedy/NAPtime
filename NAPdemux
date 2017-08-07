@@ -9,7 +9,7 @@ use File::Path qw(make_path remove_tree);
 use Data::Dumper;
 #use Array::Utils;
 
-my $version = "0.1.1"; #30/4/17
+my $version = "0.1.2"; #07/08/17
 
 my $help;
 my @tables_paths;
