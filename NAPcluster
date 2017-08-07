@@ -59,6 +59,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
 	   "otuassign=s"	=> \$parameters{otuassign},
 	   "minsize=s"		=> \$parameters{minsize},
+	   "seqlength=i"	=> \$parameters{seqconv},
 	   "blastpath=s"	=> \$blastparams{blastpath},
 	   "blasthits=s"	=> \$blastparams{blasthits},
 	   "assignsens=s"	=> \$blastparams{assignsens},
@@ -88,6 +89,7 @@ my $pathroot = "$outpath/temp/cluster.";
 
 my @files=@ARGV;
 
+
 #
 # Check for blast database and arrange threads
 #
@@ -114,6 +116,7 @@ my %paramdefaults = (
 	'minsize'		=> 2,
 	'cluster_method'	=> 'usearch',
 	'otuassign'		=> 3,
+	'seqconv'		=> 100,
 );
 my @params = keys %parameters;
 @parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
@@ -122,16 +125,21 @@ if($parameters{filter_chimeras} eq 'both'){
 	$parameters{filter_chimeras} = "yes,no";
 	warn "\nWarning: cluster_method \"swarm\" does no chimera filtering\n" if $parameters{cluster_method} =~ /swarm/;
 }elsif($parameters{filter_chimeras} eq 'no'){
-	warn "\nWarning: cluster method \"swarm\" does no chimera filtering, it is advisable to use a different option\n\n" if $parameters{cluster_method} =~ /swarm/;
+	warn "\nWarning: cluster' method \"swarm\" does no chimera filtering, it is advisable to use a different option\n\n" if $parameters{cluster_method} =~ /swarm/;
 }elsif($parameters{filter_chimeras} ne 'swarm' and $parameters{filter_chimeras} ne 'yes'){
 	die "Error: value $parameters{filter_chimeras} passed to --filter_chimeras not recognised\n";
 }
+
+$parameters{seqconv} = $parameters{seqconv}/100;
 
 #
 # Set up parameter iterations
 #
 my ($iterations,$expand_parameters,$n_discarded) = parse_parameters($mode,\%parameters);
 my @n_iter = sort keys %$iterations;
+
+print "Debug: parsed iteration hash follows:" if $debug;
+print Dumper \$iterations;
 
 printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded removed for non-integer otu assignment parameter for swarm" : "" if($verbose and $#n_iter>0);
 
@@ -1012,9 +1020,12 @@ sub parse_parameters {
 	my %iterhash;
 	foreach my $it (0 .. $#allarray){
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
-		if($iterhash{$it+1}{cluster_method} eq "swarm" and $iterhash{$it+1}{otuassign} =~ /\./){
-			delete($iterhash{$it+1});
-			$nonint_removed++;
+		if($iterhash{$it+1}{cluster_method} eq "swarm"){
+			$iterhash{$it+1}{otuassign} = $iterhash{$it+1}{otuassign}*$parameters{seqconv};
+			if($iterhash{$it+1}{otuassign} =~ /\./){
+				delete($iterhash{$it+1});
+				$nonint_removed++;
+			}
 		}
 	}
 	my $newid = 1;
