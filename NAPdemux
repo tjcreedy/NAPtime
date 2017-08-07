@@ -9,7 +9,7 @@ use File::Path qw(make_path remove_tree);
 use Data::Dumper;
 #use Array::Utils;
 
-my $version = "0.1.1"; #30/4/17
+my $version = "0.1.2"; #07/08/17
 
 my $help;
 my @tables_paths;
@@ -18,7 +18,8 @@ my $errortolerance = 0.1;
 my $outpath;
 my $convert;
 my $wipe;
-my $verbose;
+our $verbose;
+our $debug;
 my $pairs = "none";
 
 my $script = basename($0, ());
@@ -63,6 +64,7 @@ GetOptions("table=s"	=> \@tables_paths,
 	   "pairs=s"	=> \$pairs,
 	   "wipe"	=> \$wipe,
 	   "verbose"	=> \$verbose,
+	   "debug"	=> \$debug,
 	   "help"	=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
 print "$usage\n" and exit if($help);
@@ -90,6 +92,9 @@ if(!defined $outpath){
 	make_path($outpath);
 }
 
+$verbose = 1 if $debug;
+print "\n#### Running in debug mode ####\n\n" if $debug;
+
 my $scroungeopt;
 $pairs =~ /(\w+)(?:-(\w+))?/;
 $pairs = $1;
@@ -98,8 +103,6 @@ die "Error: Unknown parameter passed to pairs, see $script --help\n" unless ($pa
 print "Pairing option is \"$pairs\"" if $verbose;
 print " and scrounging option is \"$scroungeopt\"" if($verbose  && $scroungeopt);
 print "\n" if $verbose;
-
-
 
 my $masterpairs = $pairs;
 
@@ -325,10 +328,13 @@ sub find_pairs {
 		open my $conv,'<',$convert or die "Error opening $convert\n";
 		while(my $row = <$conv>){
 			chomp $row;
+			$row =~ s/["'\r ]//g;
 			my ($c_name,$c_well) = split /[\t,]+/, $row;
 			$conversion{$c_name} = $c_well;
 		}
 		close $conv;
+		print "Debug of conversion table -> hash follows:\n" if $debug;
+		print Dumper \%conversion if $debug;
 	}
 	foreach my $file (@allfiles){
 		my ($file_name,$dir)=fileparse($file);
@@ -336,7 +342,8 @@ sub find_pairs {
 			my $n = $2+0;
 			$filepairs{$1.$n}[$3-1]=$file;
 		}elsif(defined $convert && $file_name =~ /(.+)_R([1|2])/){
-			$filepairs{$conversion{$1}}[$2-1] = $file
+			die "Error: $file cannot be matched in conversion table\n" unless $conversion{$1};
+			$filepairs{$conversion{$1}}[$2-1] = $file;
 		}else{
 			warn "Input file $file does not contain '_R1_' or '_R2_' in name and/or cannot be matched in conversion table\n";
 		}
