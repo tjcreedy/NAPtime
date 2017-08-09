@@ -484,7 +484,7 @@ sub cluster_and_map{
 	} elsif(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		$idpc=1-(${$iterations}{$iter}{otuassign}/100);
 	} else {
-		$idpc = 0.97;
+		$idpc =1-(${$iterations}{$iter}{otuassign}/(100*${$iterations}{$iter}{seqconv}));
 	}
 	print timestamp(),":$printstring starting mapping all reads to OTUs using id $idpc\n" if $verbose;
 	my $mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1";
