@@ -69,8 +69,15 @@ GetOptions("table=s"	=> \@tables_paths,
 
 print "$usage\n" and exit if($help);
 
+$verbose = 1 if $debug;
+print "\n#### Running in debug mode ####\n\n" if $debug;
+
 if(scalar @ARGV == 0){
-	die "I need me some files to demux, see \"$script --help\" for more information\n";
+	if($debug){
+		warn "No input files, running for debug purposes only\n";
+	} else {
+		die "I need me some files to demux, see \"$script --help\" for more information\n";
+	}
 }
 
 my @files = @ARGV;
@@ -92,9 +99,6 @@ if(!defined $outpath){
 	make_path($outpath);
 }
 
-$verbose = 1 if $debug;
-print "\n#### Running in debug mode ####\n\n" if $debug;
-
 my $scroungeopt;
 $pairs =~ /(\w+)(?:-(\w+))?/;
 $pairs = $1;
@@ -109,11 +113,11 @@ my $masterpairs = $pairs;
 print "Parsing input files\n" if $verbose ;
 my %paired_files=find_pairs(\@files,$convert);
 
-
-
-
 print "Parsing barcode table(s)\n" if $verbose ;
 my %demux_tags = parse_barcodefiles(\@tables_paths, $columns);
+
+print "Debug: demux hash follows:\n" if $debug;
+print Dumper \%demux_tags if $debug;
 
 my %log;
 
@@ -137,6 +141,8 @@ foreach my $welln (sort keys %paired_files){
 	}
 	my $R1cmd = "cutadapt $R1adapter_line -e $errortolerance -o $outpath\{name}_R1.fq --untrimmed-output $outpath$untagged_output\_R1.fq $paired_files{$welln}[0]";
 	my $R2cmd = "cutadapt $R2adapter_line -e $errortolerance -o $outpath\{name}_R2.fq --untrimmed-output $outpath$untagged_output\_R2.fq $paired_files{$welln}[1]";
+	print "\nDebug: cutadapt R1 command follows:\n$R1cmd\nDebug: cutadapt R2 command follows:\n$R2cmd\n\n" if $debug;
+	
 	print "Running cutadapt on files $welln\n" if $verbose;
 	#print "R1cmd:\n",$R1cmd,"\n\n";
 	#print "R2cmd:\n",$R2cmd,"\n\n";
@@ -290,6 +296,8 @@ foreach my $welln (sort keys %paired_files){
 	$pairs = $masterpairs;
 }
 
+print "Completed demultiplexing\n" if $verbose;
+
 open my $logout, '>', "$outpath/demultiplexing.log.csv";
 print $logout "well,direction,sampleid,n_tagged_reads_found";
 print $logout ",n_matepairs_found,n_singletons" if($masterpairs ne "none");
@@ -315,6 +323,8 @@ foreach my $well (sort keys %log){
 	}
 }
 close $logout;
+
+print "Logfiles output, all done :)\n" if $verbose;
 
 exit;
 
@@ -360,18 +370,17 @@ sub parse_barcodefiles {
 	die "Error: Must specify three or four columns" unless($ncols==3 || $ncols==4);
 	my %tags;
 	foreach my $bc_table (@$inpaths){
-
-		open my $bc_read, '<', $bc_table or die "Error: Couldn't read $bc_table";
-
+		open my $bc_read, '<', $bc_table or die "Error: Couldn't read $bc_table\n";
 		while(my $row = <$bc_read>){
 			chomp $row;
 			$row =~ s/["'\r ]//g; #remove any quotation marks, spaces or DOS line endings
+			die "Error: illegal character in $bc_table, one of: ()[]{}\$\@\% in row:\n$row\n" if $row =~ /[\(\)\{\}\[\]\$\@\%]/;
 			my @line = split /[\t,]+/, $row; #split row of table by tabs and/or commas
 			my $sampleid;
 			my $well;
 
 			if($ncols == 4){ #if four columns specified, assuming 4th specification is well column as requested in usage
-				$well = $line[$column_spec[3]-1]; #set well as the 4th[specified column
+				$well = $line[$column_spec[3]-1]; #set well as the 4th specified column
 				$sampleid = "$line[$column_spec[0]-1]_$well";
 			} else {
 				$sampleid = $line[$column_spec[0]-1];
@@ -393,8 +402,6 @@ sub parse_barcodefiles {
 	
 	return %tags;
 }
-
-
 
 sub parse_cutlog {
 	my ($clog,$cuntag) = @_;
