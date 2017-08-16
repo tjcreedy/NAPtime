@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.4.2"; #07/08/17
+my $version = "0.4.3"; #16/08/17
 
 my $help;
 my $outpath;
@@ -775,7 +775,7 @@ sub batch_taxonomyblast{
 	
 	# blast
 	printf "%d sequences to BLAST, this %s\n",scalar @ids, scalar @ids/${$parameters}{blastthreads}>6 ? scalar @ids/${$parameters}{blastthreads}>12 ? "will take some time" : "may take some time" : "won't take too long";
-	my $blastcmd = "blastn -query $querypath -db ${$parameters}{blastpath} -num_threads ${$parameters}{blastthreads} -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 qseqid sacc bitscore\"";
+	my $blastcmd = "blastn -query $querypath -db ${$parameters}{blastpath} -num_threads ${$parameters}{blastthreads} -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 qseqid sacc bitscore pident\"";
 	my $blastdump;
 	my $blasttries = 0;
 	while(!$blastdump && $blasttries<5){
@@ -812,12 +812,19 @@ sub batch_taxonomyblast{
 			if(!exists(${$hits}{$qid})){
 				$out{$qid}{nhits} = 0;
 				$out{$qid}{bgt} = ["NA"];
+				$out{$qid}{nmatch} = 0;
+				$out{$qid}{prop} = "NA";
+				$out{$qid}{score} = "NA";
+				$out{$qid}{id} = "NA";
+				$out{$qid}{topid} = "NA";
 				next;
 			}
 #			print "otu $qid ";
 			my @linaoa;
+			my @lin_acc;
 			foreach my $acc (keys %{${$hits}{$qid}}){
 				push @linaoa,[ split /;\s/,${$hits}{$qid}{$acc}{lineage} ];
+				push @lin_acc, $acc;
 				$out{$qid}{nhits}++;
 			}
 			
@@ -825,6 +832,8 @@ sub batch_taxonomyblast{
 			my $totalhits = scalar @linaoa;
 			my $maxlength = max( map { $#{$_} } @linaoa );
 			my $outi = $maxlength;
+			my $prop;
+			my $nmatch;
 			foreach my $ti (0..$maxlength){
 				printf "run comparison for taxon $ti of %d lineages with maxlength of $maxlength taxa\n", scalar @linaoa;
 				#print Dumper \@linaoa;
@@ -838,7 +847,8 @@ sub batch_taxonomyblast{
 					print "lineages too divergent, ending at taxon $outi\n";
 					last;
 				}
-				
+				$nmatch = sum(@matchi);
+				$prop = sum(@matchi)/$totalhits;
 				print "sufficient similarity, subsetting...";
 				my @nextlinaoa;
 				foreach my $i (0..$#linaoa){
@@ -855,7 +865,15 @@ sub batch_taxonomyblast{
 			}
 			
 			my @ind = grep { $matchi[$_] == 1 } 0..$#matchi;
+			my @acc_used = @lin_acc[@ind];
 			$out{$qid}{bgt} = [ @{$linaoa[$ind[0]]}[0..$outi] ];
+			$out{$qid}{nmatch} = $nmatch;
+			$out{$qid}{prop} = $prop;
+			my @scores = map {${$hits}{$qid}{$_}{score}} @acc_used;
+			$out{$qid}{score} = sum(@scores)/scalar @scores;
+			my @ids = map {${$hits}{$qid}{$_}{id}} @acc_used;
+			$out{$qid}{id} = sum(@ids)/scalar @ids;
+			$out{$qid}{topid} = max(@ids);
 		}
 	}
 	system("rm $querypath");
@@ -898,6 +916,7 @@ sub parse_blastdump{
 		chomp $row;
 		my @line = split /\t/, $row;
 		$hits{$line[0]}{$line[1]}{score} = $line[2];
+		$hits{$line[0]}{$line[1]}{pident} = $line[3];
 		$acchash{$line[1]} = 1;
 	}
 	close $bd;
@@ -1043,13 +1062,13 @@ sub read_fasta {
 	my $id;
 	my ($name,$dir)=fileparse($fapathin);
 	$name =~ s/^(.+)\.[^.]+$/$1/;
-	my $barcodelabelsadded;
+	my $barcodelabelsadded = 0;
 	open my $fa_in, '<', $fapathin or die "Couldn't open $fapathin\n";
 	while(my $row = <$fa_in>){
 		chomp $row;
 		if($row =~ /^>(.+)$/){
 			$id = $1;
-			if($checklabel and !($id =~ /;barcodelabel=\w+;/)){
+			if($checklabel and !($id =~ /;barcodelabel=[^;]+;/)){
 				$barcodelabelsadded++;
 				$id.=";barcodelabel=$name;";
 			}
