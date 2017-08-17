@@ -159,16 +159,14 @@ my %stats = (
 #
 print "Reading and concatenating all files\n" if $verbose;
 my %allfasta;
-my @emptyfilenames;
+my %samples;
 foreach my $file (@files){
 	my %fasta = read_fasta($file,"check");
 	printf "$file has %d sequences\n", scalar keys %fasta if $debug;
-	if(scalar keys %fasta < 1){
-		warn "Warning: file $file is empty!\n";
-		my ($name,$dir)=fileparse($file);
-		$name =~ s/^(.+)\.[^.]+$/$1/;
-		push @emptyfilenames, $name;
-	}
+	warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
+	my ($name,$dir)=fileparse($file);
+	$name =~ s/^(.+)\.[^.]+$/$1/;
+	$samples{$name}=0;
 	@allfasta{keys %fasta} = values %fasta;
 }
 
@@ -255,7 +253,7 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (keys %$iterations){;
 	my $pid = $pm->start and next;
 	
-	my ($log,$otus) = cluster_and_map($allreads_raw,$pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs,@emptyfilenames);
+	my ($log,$otus) = cluster_and_map($allreads_raw,$pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs,\%samples);
 	
 	$pm->finish(0, {log => $log, otus => $otus, iter => $iter});
 }
@@ -327,7 +325,7 @@ print "\nCSV log successfully written to $logpath\n" if $verbose;
 exit;
 
 sub cluster_and_map{
-	my ($allreads_raw,$pathroot,$iterations,$iter,$params,$stats,$maxmapseqs,$emptyfilenames) = @_;
+	my ($allreads_raw,$pathroot,$iterations,$iter,$params,$stats,$maxmapseqs,$samples) = @_;
 	
 	my %log;
 	
@@ -353,7 +351,6 @@ sub cluster_and_map{
 	#
 	# Perform clustering
 	#
-#	open my $fh, '>', "temp.txt";
 		
 	my $n_chimeras_uchime = "NA";
 	my $clusterinput = $sortpath;
@@ -462,7 +459,7 @@ sub cluster_and_map{
 		print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
 	}
 	
-	convert_uc_and_write($ucpath,$mappath,$emptyfilenames);
+	convert_uc_and_write($ucpath,$mappath,$samples);
 	
 	print timestamp(),":$printstring completed mapping, map written to $mappath\n" if $verbose;
 	
@@ -530,7 +527,7 @@ sub derep_sort_write{
 	#
 	my @sorted_seqs = sort { $dereplicated{$b} <=> $dereplicated{$a} } keys %dereplicated;
 	open my $sorted, '>', $sortpath;
-	my $bigenough;
+	my $bigenough = 0;
 	foreach my $seq (@sorted_seqs){
 		if($dereplicated{$seq}>=$mins){
 			$bigenough++;
@@ -873,31 +870,32 @@ sub read_fasta {
 }
 
 sub convert_uc_and_write {
-	my ($ucpath,$outpath,$emptyfilenames) = @_;
+	my ($ucpath,$outpath,$samples) = @_;
 	my %tab;
-	my %samples;
 	my %otus;
 	open my $uc, '<', $ucpath or die "Error opening $ucpath\n";
 	while(my $row = <$uc>){
 		chomp $row;
 		if($row =~ /^H.*barcodelabel=([^;]+);\t(.*)$/){
 			$tab{$1}{$2}++;
-			$samples{$1}=1;
+			${$samples}{$1}++;
 			$otus{$2}=1;
 		}
 	}
 	close $uc;
+	
 	open my $csv, '>', $outpath or die "Error opening $outpath\n";
 	print $csv "sample,",join(",",sort keys %otus),"\n";
-	foreach my $sample (sort keys %samples){
+	foreach my $sample (sort keys %$samples){
 		print $csv $sample;
-		foreach my $otu (sort keys %otus){
-			print $csv ",",$tab{$sample}{$otu} ? $tab{$sample}{$otu} : 0;
+		if(${$samples}{$sample}>0){
+			foreach my $otu (sort keys %otus){
+				print $csv ",",$tab{$sample}{$otu} ? $tab{$sample}{$otu} : 0;
+			}
+		} else {
+			print $csv ",0" x scalar keys %otus;
 		}
 		print $csv "\n";
-	}
-	foreach my $sample (@$emptyfilenames){
-		print $csv "$sample",",0" x scalar keys %otus,"\n";
 	}
 	close $csv;
 }
