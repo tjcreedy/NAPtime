@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.5.0"; #17/08/17
+my $version = "0.5.1"; #17/08/17
 
 my $help;
 my $outpath;
@@ -159,10 +159,16 @@ my %stats = (
 #
 print "Reading and concatenating all files\n" if $verbose;
 my %allfasta;
+my @emptyfilenames;
 foreach my $file (@files){
 	my %fasta = read_fasta($file,"check");
-#	printf "$file has %d sequences\n", scalar keys %fasta;
-	warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
+	printf "$file has %d sequences\n", scalar keys %fasta if $debug;
+	if(scalar keys %fasta < 1){
+		warn "Warning: file $file is empty!\n";
+		my ($name,$dir)=fileparse($file);
+		$name =~ s/^(.+)\.[^.]+$/$1/;
+		push @emptyfilenames, $name;
+	}
 	@allfasta{keys %fasta} = values %fasta;
 }
 
@@ -249,7 +255,7 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (keys %$iterations){;
 	my $pid = $pm->start and next;
 	
-	my ($log,$otus) = cluster_and_map($allreads_raw,$pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs);
+	my ($log,$otus) = cluster_and_map($allreads_raw,$pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs,@emptyfilenames);
 	
 	$pm->finish(0, {log => $log, otus => $otus, iter => $iter});
 }
@@ -321,7 +327,7 @@ print "\nCSV log successfully written to $logpath\n" if $verbose;
 exit;
 
 sub cluster_and_map{
-	my ($allreads_raw,$pathroot,$iterations,$iter,$params,$stats,$maxmapseqs) = @_;
+	my ($allreads_raw,$pathroot,$iterations,$iter,$params,$stats,$maxmapseqs,$emptyfilenames) = @_;
 	
 	my %log;
 	
@@ -456,7 +462,7 @@ sub cluster_and_map{
 		print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
 	}
 	
-	convert_uc_and_write($ucpath,$mappath);
+	convert_uc_and_write($ucpath,$mappath,$emptyfilenames);
 	
 	print timestamp(),":$printstring completed mapping, map written to $mappath\n" if $verbose;
 	
@@ -867,7 +873,7 @@ sub read_fasta {
 }
 
 sub convert_uc_and_write {
-	my ($ucpath,$outpath) = @_;
+	my ($ucpath,$outpath,$emptyfilenames) = @_;
 	my %tab;
 	my %samples;
 	my %otus;
@@ -889,6 +895,9 @@ sub convert_uc_and_write {
 			print $csv ",",$tab{$sample}{$otu} ? $tab{$sample}{$otu} : 0;
 		}
 		print $csv "\n";
+	}
+	foreach my $sample (@$emptyfilenames){
+		print $csv "$sample",",0" x scalar keys %otus,"\n";
 	}
 	close $csv;
 }
