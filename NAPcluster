@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.4.3"; #16/08/17
+my $version = "0.5.0"; #17/08/17
 
 my $help;
 my $outpath;
@@ -54,12 +54,12 @@ USAGE
 
 GetOptions("output=s"		=> \$outpath,
 	   "mode=s"		=> \$mode,
-	   "minlength=s"	=> \$parameters{minlength},
+	   "length_var=s"	=> \$parameters{length_var},
 	   "cluster_method=s"	=> \$parameters{cluster_method},
 	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
-	   "otuassign=s"	=> \$parameters{otuassign},
+	   "cpv=s"	=> \$parameters{cpv},
 	   "minsize=s"		=> \$parameters{minsize},
-	   "seqlength=i"	=> \$parameters{seqconv},
+	   "seqlength=i"	=> \$parameters{seqlength},
 	   "blastpath=s"	=> \$blastparams{blastpath},
 	   "blasthits=s"	=> \$blastparams{blasthits},
 	   "assignsens=s"	=> \$blastparams{assignsens},
@@ -76,7 +76,8 @@ GetOptions("output=s"		=> \$outpath,
 print "$usage\n" and exit if($help);
 
 die "I need some files to work on, see \"$script --help\" for more information\n" if(scalar @ARGV == 0);
-die "Error: minlength must be specified\n" unless(defined $parameters{minlength});
+die "Error: sequence length must be specified\n" unless(defined $parameters{seqlength});
+
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
 } else {
@@ -86,6 +87,8 @@ if(!defined $outpath){
 	$outpath =~ s/\/$//;
 }
 my $pathroot = "$outpath/temp/cluster.";
+
+$verbose = 1 if $debug;
 
 my @files=@ARGV;
 
@@ -115,8 +118,8 @@ my %paramdefaults = (
 	'filter_chimeras'	=> 'no',
 	'minsize'		=> 2,
 	'cluster_method'	=> 'usearch',
-	'otuassign'		=> 3,
-	'seqconv'		=> 100,
+	'cpv'		=> 3,
+	'length_var'		=> 1,
 );
 my @params = keys %parameters;
 @parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
@@ -130,7 +133,7 @@ if($parameters{filter_chimeras} eq 'both'){
 	die "Error: value $parameters{filter_chimeras} passed to --filter_chimeras not recognised\n";
 }
 
-$parameters{seqconv} = $parameters{seqconv}/100;
+$parameters{seqconv} = $parameters{seqlength}/100;
 
 #
 # Set up parameter iterations
@@ -146,7 +149,7 @@ printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", af
 my %otusets;
 my %stats = (
 	general	=> ['input_sequences','iteration'],
-	derep	=> ['n_seq_discarded_<minlength','sequences_remain','n_groups','mean_groupsize','min_groupsize','max_groupsize'],
+	derep	=> ['sequence_length','sequence_length_variation_pc','minlength','maxlength','length_discarded','sequences_remain','n_groups','mean_groupsize','min_groupsize','max_groupsize'],
 	size	=> ['n_groups_discarded_<minsize','n_groups_remain'],
 	cluster	=> ['n_otus','n_chimeras_uchime','n_chimeras_cluster']
 );
@@ -184,73 +187,6 @@ my $errormessage = "You may want to try running with fewer threads, and check th
 # Do dereplication
 #
 
-# my %derep_log;
-
-# my $dpm = Parallel::ForkManager->new($threads);
-# my $dpm_done=0;
-
-# $dpm->run_on_finish( sub {
-	# my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
-	# $dpm_done++;
-	# printf "Completed $dpm_done/%d dereplication iterations\n",scalar @{${$expand_parameters}{minlength}} if $verbose and $mode eq 'eval';
-	# die "Error: dereplication thread failed to output\n" unless $data_structure_reference;
-	# my $minl = $data_structure_reference->{minl};
-	# $derep_log{$minl} = $data_structure_reference->{log};
-# });
-
-# print "Starting writing and dereplication\n" if $verbose and $mode eq "batch";
-# printf "Starting %d writing and dereplication iterations using $threads threads \n", scalar @{${$expand_parameters}{minlength}} if $verbose and $mode eq "eval";
-
-# foreach my $minl (@{${$expand_parameters}{minlength}}){
-	# my $pid = $dpm->start and next;
-	
-	# my $log = write_and_dereplicate(\%allfasta,$pathroot,$minl,\%stats,$errormessage,$maxderepseqs);
-	# $dpm->finish(0, {log => $log, minl => $minl});
-# }
-
-# $dpm->wait_all_children;
-# print "\n";
-
-# Can clear allfasta from memory now
-# undef %allfasta;
-
-#
-# Do sorting by size
-#
-
-# my %sort_log;
-
-# my $spm = Parallel::ForkManager->new($threads);
-# my $spm_done=0;
-
-# $spm->run_on_finish( sub {
-	# my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
-	# $spm_done++;
-	# printf "Completed $spm_done/%d size sorting iterations\n",scalar @{${$expand_parameters}{minlength}}if $verbose and $mode eq 'eval';
-	# die "Error: size thread failed to output\n" unless $data_structure_reference;
-	# my $minl = $data_structure_reference->{minl};
-	# my $mins = $data_structure_reference->{mins};
-	# $sort_log{$minl}{$mins} = $data_structure_reference->{log};
-# });
-
-# print "Starting size sorting\n" if $verbose and $mode eq "batch";
-# printf "Starting %d size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{minlength}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
-
-# foreach my $minl (@{${$expand_parameters}{minlength}}){
-	# foreach my $mins (@{${$expand_parameters}{minsize}}){
-		# my $pid = $spm->start and next;
-	
-		# my $log = sizesort($pathroot,$mins,$minl,\%stats,$errormessage);
-	
-		# $spm->finish(0, {log => $log, minl => $minl, mins => $mins});
-	# }
-# }
-
-# $spm->wait_all_children;
-# print "\n";
-
-# Do derep and sort onboard
-
 my %derep_log;
 my %sort_log;
 
@@ -260,24 +196,24 @@ my $bpm_done=0;
 $bpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$bpm_done++;
-	printf "Completed $bpm_done/%d dereplication and size sorting iterations\n",(scalar @{${$expand_parameters}{minlength}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq 'eval';
+	printf "Completed $bpm_done/%d dereplication and size sorting iterations\n",(scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq 'eval';
 	die "Error: size thread failed to output\n" unless $data_structure_reference;
-	my $minl = $data_structure_reference->{minl};
+	my $lvar = $data_structure_reference->{lvar};
 	my $mins = $data_structure_reference->{mins};
-	$sort_log{$minl}{$mins} = $data_structure_reference->{slog};
-	$derep_log{$minl}{$mins} = $data_structure_reference->{dlog};
+	$sort_log{$lvar}{$mins} = $data_structure_reference->{slog};
+	$derep_log{$lvar}{$mins} = $data_structure_reference->{dlog};
 });
 
 print "Starting dereplication and size sorting\n" if $verbose and $mode eq "batch";
-printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{minlength}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
+printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
 
-foreach my $minl (@{${$expand_parameters}{minlength}}){
+foreach my $lvar (@{${$expand_parameters}{length_var}}){
 	foreach my $mins (@{${$expand_parameters}{minsize}}){
 		my $pid = $bpm->start and next;
 	
-		my ($dlog,$slog) = derep_sort_write(\%allfasta,$pathroot,$minl,$mins,\%stats);
+		my ($dlog,$slog) = derep_sort_write(\%allfasta,$pathroot,$parameters{seqlength},$lvar,$mins,\%stats);
 	
-		$bpm->finish(0, {slog => $slog, dlog => $dlog, minl => $minl, mins => $mins});
+		$bpm->finish(0, {slog => $slog, dlog => $dlog, lvar => $lvar, mins => $mins});
 	}
 }
 
@@ -341,13 +277,14 @@ if($doblast){
 
 	my $taxonomies = batch_taxonomyblast(\%seqstoblast,\%blastparams);
 #	print Dumper $taxonomies;
-	my $taxonomypath = "$outpath/cluster.otus.taxonomy.txt";
+	my $taxonomypath = "$outpath/cluster.otus.taxonomy.csv";
 	open my $taxout, '>', $taxonomypath;
-	print $taxout "iteration,otu_id,duplicate,taxonomy_lineage,nhits\n";
+	print $taxout "iteration,otu_id,duplicate,taxonomy_lineage,nhits,n_contributing_lineages,prop_contributing_lineages,top_contributor_id,mean_contributor_id,mean_contributor_score\n";
 	foreach my $id (keys %seqstoblast){
 		my @duplicates = @{$allotuseqs{$seqstoblast{$id}}};
 		foreach my $i (0..$#duplicates){
-			print $taxout "$duplicates[$i],$i,",join(";",@{${$taxonomies}{$id}{bgt}}),",${$taxonomies}{$id}{nhits}\n";
+			print $taxout "$duplicates[$i],$i,",join(";",@{${$taxonomies}{$id}{bgt}}),",${$taxonomies}{$id}{nhits},${$taxonomies}{$id}{nmatch},${$taxonomies}{$id}{prop},";
+			print $taxout "${$taxonomies}{$id}{topid},${$taxonomies}{$id}{id},${$taxonomies}{$id}{score}\n";
 		}
 	}
 	close $taxout;
@@ -364,12 +301,12 @@ my @head = (@{$stats{general}},@params,@{$stats{derep}},@{$stats{size}},@{$stats
 print $logcsv join(',',@head);
 
 foreach my $i (keys %$iterations){
-	my $minl = ${$iterations}{$i}{minlength};
+	my $lvar = ${$iterations}{$i}{length_var};
 	my $mins = ${$iterations}{$i}{minsize};
 	print $logcsv "\n$input_sequences,$i,",
 		join(',',@{$cluster_log{$i}}{@params},
-			@{$derep_log{$minl}{$mins}}{@{$stats{derep}}},
-			@{$sort_log{$minl}{$mins}}{@{$stats{size}}},
+			@{$derep_log{$lvar}{$mins}}{@{$stats{derep}}},
+			@{$sort_log{$lvar}{$mins}}{@{$stats{size}}},
 			@{$cluster_log{$i}}{@{$stats{cluster}}}
 			);
 }
@@ -397,7 +334,7 @@ sub cluster_and_map{
 	# Prepare paths
 	#
 		# Existing paths for source of this iteration
-	my $sortpath = $pathroot."sort_minl${$iterations}{$iter}{minlength}_mins${$iterations}{$iter}{minsize}.fa";
+	my $sortpath = $pathroot."sort_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
 		# New paths
 	$pathroot .= "iteration$iter.";
 	my $chimerapath = $pathroot."chimeras.fa";
@@ -432,16 +369,16 @@ sub cluster_and_map{
 	}
 	
 	my ($nOTUs,$n_chimeras_cluster);
-	if (${$iterations}{$iter}{otuassign} == 0){
+	if (${$iterations}{$iter}{cpv} == 0){
 		print timestamp(),":$printstring clustering skipped because assignment value is 0\n" if $verbose;
 		system("cp $clusterinput $otuspath");
 		my $seqs = `cat $clusterinput | grep -c '^>'`;
 		($nOTUs,$n_chimeras_cluster) = ($seqs-{${$iterations}{$iter}{filter_chimeras} eq "yes"  ? 0 : $n_chimeras_uchime},"NA");
 	} else {
-		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{otuassign} on file $clusterinput\n" if $verbose;
+		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{cpv} on file $clusterinput\n" if $verbose;
 		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
-			my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{otuassign} 2>&1";
+			my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} 2>&1";
 	#		print "Command: $cluster_cmd\n";
 			my $cluster_log = `$cluster_cmd`;
 	#		print $fh $cluster_log,"\n";
@@ -456,7 +393,7 @@ sub cluster_and_map{
 			my $sed_cmd = "sed -i -e'/^>/ ! s/N/$randbase/g' $clusterinput";
 	#		print $sed_cmd,"\n";
 			system($sed_cmd);
-			my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{otuassign} -o $swarmpath -w $otuspath $clusterinput 2>&1";
+			my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{cpv} -o $swarmpath -w $otuspath $clusterinput 2>&1";
 	#		print $cluster_cmd,"\n";
 			my $cluster_log = `$cluster_cmd`;
 	#		print $cluster_log,"\n";
@@ -479,19 +416,19 @@ sub cluster_and_map{
 	#
 	
 	my $idpc;
-	if(${$iterations}{$iter}{otuassign} == 0){
+	if(${$iterations}{$iter}{cpv} == 0){
 		$idpc=0.99
 	} elsif(${$iterations}{$iter}{cluster_method} eq "usearch"){
-		$idpc=1-(${$iterations}{$iter}{otuassign}/100);
+		$idpc=1-(${$iterations}{$iter}{cpv}/100);
 	} else {
-		$idpc =1-(${$iterations}{$iter}{otuassign}/(100*${$iterations}{$iter}{seqconv}));
+		$idpc =1-(${$iterations}{$iter}{cpv}/(100*${$iterations}{$iter}{seqconv}));
 	}
 	print timestamp(),":$printstring starting mapping all reads to OTUs using id $idpc\n" if $verbose;
 	my $mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1";
 	print "Command: $mapcmd\n";
 	my $maplog=`$mapcmd`;
 	print "Log:\n$maplog\n";
-	if($maplog =~ /File\ssize\stoo\sbig/s or $debug){
+	if($maplog =~ /File\ssize\stoo\sbig/s){
 		undef $maplog;
 		unlink $ucpath;
 		print timestamp(),":$printstring initial mapping failed, likely for too many sequences, attempting iterative mapping mode\n" if $verbose;
@@ -538,27 +475,29 @@ sub cluster_and_map{
 }
 
 sub derep_sort_write{
-	my($allfasta,$pathroot,$minl,$mins,$stats) = @_;
-	print timestamp(),": starting dereplication and sort iteration with minlength $minl and minsize $mins, pid $$\n" if $verbose;
+	my($allfasta,$pathroot,$len,$lvar,$mins,$stats) = @_;
+	my $minl = floor($len-($lvar*$len)/100);
+	my $maxl = ceil($len+($lvar*$len)/100);
+	print timestamp(),": starting dereplication and sort iteration with length_var $minl%: $minl-${maxl}bp inclusive, and min group size $mins, pid $$\n" if $verbose;
 	my %dlog;
 	my %slog;
 	
-	my $printstring = join "", $threads>1 ? " pid $$" : "" , " minlength $minl minsize $mins";
+	my $printstring = join "", $threads>1 ? " pid $$" : "" , " length_var $lvar minsize $mins";
 	
-	my $sortpath = $pathroot."sort_minl$minl\_mins$mins.fa";
+	my $sortpath = $pathroot."sort_lvar$lvar\_mins$mins.fa";
 	
 	#
-	# Dereplicate all sequences greater than minlength
+	# Dereplicate all sequences within length variation
 	#
-	my $minlength_discarded = 0;
-	my $minlength_passed = 0;
+	my $length_discarded = 0;
+	my $length_passed = 0;
 	my %dereplicated;
 	foreach my $id (keys %$allfasta){
-		if(length(${$allfasta}{$id})>=$minl){
+		if(length(${$allfasta}{$id})>=$minl and length(${$allfasta}{$id})<=$maxl){
 			$dereplicated{${$allfasta}{$id}}++;
-			$minlength_passed++;
+			$length_passed++;
 		} else {
-			$minlength_discarded++;
+			$length_discarded++;
 		}
 	}
 	
@@ -574,11 +513,11 @@ sub derep_sort_write{
 	my $singletons  = $sizecount{1} ? $sizecount{1} : 0;
 	my $minsize = min(@groupsizes);
 	my $topsize = max(@groupsizes);
-	my $mean_groupsize = $minlength_passed/$ngroup;
+	my $mean_groupsize = $length_passed/$ngroup;
 	
-	@dlog{@{${$stats}{derep}}} = ($minlength_discarded,$minlength_passed,$ngroup,$mean_groupsize,$minsize,$topsize);
+	@dlog{@{${$stats}{derep}}} = ($len,$lvar,$minl,$maxl,$length_discarded,$length_passed,$ngroup,$mean_groupsize,$minsize,$topsize);
 	
-	print timestamp(),":$printstring discarded $minlength_discarded sequences <${minl}bp, $minlength_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
+	print timestamp(),":$printstring discarded $length_discarded sequences <${minl}bp or >${maxl}bp, $length_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
 	
 	#
 	# Output sequences size sorted
@@ -603,161 +542,6 @@ sub derep_sort_write{
 	@slog{@{${$stats}{size}}} = ($minsize_discarded,$n_groups_remain);
 	
 	return(\%dlog,\%slog);
-}
-
-
-
-
-
-
-sub write_and_dereplicate{
-	my($allfasta,$pathroot,$minl,$stats,$errormessage,$maxderepseqs) = @_;
-	print timestamp(),": starting iteration minlength $minl with pid $$\n" if $verbose;
-	my %log;
-	my $printstring = join "", $threads>1 ? " pid $$" : "" , " minlength $minl";
-	
-	my $allreadspath = $pathroot."allreads_minl$minl.fa";
-	my $dereppath = $pathroot."derep_minl$minl.fa";
-	
-	#
-	# Write all sequences greater than minlength
-	#
-	my $minlength_discarded=0;
-	my $allreads_written;
-	open my $allout, '>', $allreadspath or die "Error writing to $allreadspath\n";
-	
-	foreach my $id (keys %$allfasta){
-		if(length(${$allfasta}{$id})>=$minl){
-			print $allout ">$id\n${$allfasta}{$id}\n";
-			$allreads_written++;
-		} else {
-			$minlength_discarded++;
-		}
-	}
-	close $allout;
-	
-	print timestamp(),":$printstring discarded $minlength_discarded sequences <${minl}bp, remaining $allreads_written written to $allreadspath\n" if $verbose;
-	
-	#
-	# Group all sequences 
-	#
-	print timestamp(),":$printstring starting dereplicating\n" if $verbose;
-	
-	my $derep_cmd;
-	my ($ngroup,$singletons,$minsize,$topsize,$mean_groupsize);
-	$derep_cmd = "usearch80 -derep_fulllength $allreadspath -fastaout $dereppath -sizeout 2>&1";
-	my $derep_log = `$derep_cmd`;
-	print $derep_log,"\n";
-	if($derep_log =~ /^.+\s(\d+)\sseqs,\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+)).+$/s){ #regex without the sizein option
-		($ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
-	} else {
-		undef $derep_log;
-		print timestamp(),":$printstring initial dereplication failed, likely for too many sequences, attempting iterative dereplication mode\n" if $verbose;
-		my $derep_loop_in = $allreadspath;
-		my $derep_loop_out;
-		
-		my $loop;
-		
-		while(!$derep_log){
-			$loop++;
-			my $ninseqs = `cat $derep_loop_in | grep -c '^>'`;
-			my $derep_iterations = ceil($ninseqs/$maxderepseqs);
-			$derep_loop_out = $pathroot."dereploopsub_minl${minl}_$loop.fa";
-			unlink("$derep_loop_out");
-			
-			print timestamp(),":$printstring dereplication loop $loop on file $derep_loop_in with $ninseqs sequences, concatenating to $derep_loop_out over $derep_iterations iterations\n" if $verbose;
-			foreach my $it (1..$derep_iterations){
-				my $linemin = 2*$maxderepseqs*($it-1)+1;
-				my $linemax = 2*$maxderepseqs*$it;
-				my $tempin = $pathroot."derepitersubin_minl$minl\_$it.fa";
-				my $tempout = $pathroot."derepitersubout_minl$minl\_$it.fa";
-				print timestamp(),":$printstring starting dereplication iteration $loop-$it using lines $linemin to $linemax of $derep_loop_in in temporary file $tempin\n" if $verbose;
-				my $subcmd = "sed -n $linemin,$linemax"."p $derep_loop_in > $tempin";
-				system("$subcmd");
-				my $derep_cmd = "usearch80 -derep_fulllength $tempin -fastaout $tempout -sizein -sizeout 2>&1";
-	#			print "Command: $derep_cmd\n";
-				my $derep_log = `$derep_cmd`;
-				printf "%s\n", (split("\n",$derep_log))[7];
-				if ($derep_log =~ /Memory limit of 32-bit process exceeded/) {
-					die "ERROR: $printstring usearch80 -derep_fulllength exceeded memory limit and failed. $errormessage\n";
-				} elsif ($derep_log =~ /Fatal error/){
-					die "ERROR: $printstring usearch80 -derep_fulllength failed for an unknown reason, full log follows: $derep_log\n$errormessage\n";
-				} elsif(!$derep_log =~ /\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+))/s){ # regex with the -sizein option
-					warn "WARNING: $printstring usearch80 -derep_fulllength failed to parse output for some reason, and probably failed to run properly entirely\n";
-				}
-				system("cat $tempout >> $derep_loop_out");
-				system("rm $tempin $tempout") unless $debug;
-				my $ncatseqs = `cat $derep_loop_out | grep -c '^>'`;
-				print timestamp(),":$printstring completed iteration $loop-$it, $tempout concatenated to $derep_loop_out and temporary files deleted\n";
-				
-			}
-			my $noutseqs = `cat $derep_loop_out | grep -c '^>'`;
-			chomp $noutseqs;
-			print timestamp(),":$printstring completed $derep_iterations iterations for loop $loop, running final dereplication on $noutseqs sequences in file $derep_loop_out\n" if $verbose;
-			$derep_cmd = "usearch80 -derep_fulllength $derep_loop_out -fastaout $dereppath -sizein -sizeout 2>&1";
-			my $derep_log = `$derep_cmd`;
-			print $derep_log,"\n";
-			if($derep_log =~ /\s(\d+)\suniques,\s(\d+)\ssingletons.+size\s(\d+).+max\s(\d+),\savg\s(\d+(?:\.\d+))/s){ #regex with the sizein option
-				($ngroup,$singletons,$minsize,$topsize,$mean_groupsize) = ($1,$2,$3,$4,$5);
-			} else {
-				print timestamp(),":$printstring dereplication failed again, likely still too many sequences, running another another set of iterations\n" if $verbose;
-				undef $derep_log;
-				my %tempfa = read_fasta($derep_loop_out);
-				open my $tempout, '>', $derep_loop_out;
-				foreach my $id (keys %tempfa){
-					print $tempout ">$id\n$tempfa{$id}\n";
-				}
-				close $tempout;
-				my $nshufseqs = scalar keys %tempfa;
-				print timestamp(),":$printstring $nshufseqs sequences unwrapped and shuffled from $derep_loop_out, ready for new iteration\n" if $verbose;
-				$derep_loop_in = $derep_loop_out;
-			}
-		}
-	}
-	
-	print timestamp(),":$printstring completed dereplication, $ngroup groups written to $dereppath\n" if $verbose;
-	
-	#
-	# Do logging and return
-	#
-	
-	@log{@{${$stats}{derep}}} = ($minlength_discarded,$allreads_written,$ngroup,$mean_groupsize,$minsize,$topsize);
-	
-	return(\%log)
-}
-
-sub sizesort{
-	my ($pathroot,$mins,$minl,$stats,$errormessage) = @_;
-	print timestamp(),": starting iteration minsize $mins for minlength $minl with pid $$\n" if $verbose;
-	my %log;
-	my $printstring = join "", $threads>1 ? " pid $$" : "" , " minlength $minl minsize $mins";
-	
-	my $dereppath = $pathroot."derep_minl$minl.fa";
-	my $sortpath = $pathroot."sort_minl$minl\_mins$mins.fa";
-	
-	#
-	# Sort by size 
-	#
-	print timestamp(),":$printstring starting sorting and discarding groups <$mins members\n" if $verbose;
-	
-	my $sort_cmd = "usearch80 -sortbysize $dereppath -fastaout $sortpath -minsize $mins 2>&1";
-	my $sort_log = `$sort_cmd`;
-#	print $sort_log,"\n";
-	my $n_groups_remain;
-	if($sort_log =~ /\s(\d+)\ssequences/){
-		$n_groups_remain = $1;
-	} elsif ($sort_log =~ /Fatal error/){
-		die "ERROR: $printstring usearch80 -sortbysize failed with an error, full log follows: $sort_log\n$errormessage\n";
-	} else {
-		warn "WARNING: $printstring usearch80 -sortbysize failed to parse output for some reason, and probably failed to run properly entirely\n";
-	}
-	my $seqs = `cat $dereppath | grep -c '^>'`;
-	my $minsize_discarded = $seqs-$n_groups_remain;
-	
-	print timestamp(),":$printstring discarded $minsize_discarded groups, $n_groups_remain remain, written to $sortpath\n" if $verbose;
-	
-	@log{@{${$stats}{size}}} = ($minsize_discarded,$n_groups_remain);
-	return(\%log);
 }
 
 sub batch_taxonomyblast{
@@ -806,7 +590,7 @@ sub batch_taxonomyblast{
 			print "took $duration seconds\n";
 			sleep (0.7-$duration) if ($duration<0.7); #ensures the frequency of eutil requests is lower than 3 per second, as recommended by NCBI.
 		}
-		store $hits, "hithashstore.log";
+		store $hits, "hithashstore.log" if $debug;
 		print "Data retrieved, processing and making best guesses\n";
 		foreach my $qid (@ids){
 			if(!exists(${$hits}{$qid})){
@@ -835,32 +619,32 @@ sub batch_taxonomyblast{
 			my $prop;
 			my $nmatch;
 			foreach my $ti (0..$maxlength){
-				printf "run comparison for taxon $ti of %d lineages with maxlength of $maxlength taxa\n", scalar @linaoa;
+				printf "run comparison for taxon $ti of %d lineages with maxlength of $maxlength taxa\n", scalar @linaoa if $debug;
 				#print Dumper \@linaoa;
 				my @testarray = map {$linaoa[$_][$ti]} (0..$#linaoa);
-				{ no warnings 'uninitialized';print join(',',@testarray),"\n";}
+				{ no warnings 'uninitialized';print join(',',@testarray),"\n" if $debug;}
 				@matchi = most_frequent_indices(@testarray);
 				print join(',',@matchi),"\n";
-				printf "comparison found %d identical...",sum(@matchi);
+				printf "comparison found %d identical...",sum(@matchi) if $debug;
 				if(sum(@matchi)/$totalhits <= ${$parameters}{assignsens}){
 					$outi = $ti-1;
-					print "lineages too divergent, ending at taxon $outi\n";
+					print "lineages too divergent, ending at taxon $outi\n" if $debug;
 					last;
 				}
 				$nmatch = sum(@matchi);
 				$prop = sum(@matchi)/$totalhits;
-				print "sufficient similarity, subsetting...";
+				print "sufficient similarity, subsetting..." if $debug;
 				my @nextlinaoa;
 				foreach my $i (0..$#linaoa){
-					push @nextlinaoa,$linaoa[$i] if($linaoa[$i][$ti] and $matchi[$i]);
+					push @nextlinaoa,$linaoa[$i] if($linaoa[$i][$ti+1] and $matchi[$i]);
 				}
 				if(!@nextlinaoa){
 					$outi = $ti;
-					print "no further taxa for remaining lineages, ending at taxon $outi\n";
+					print "no further taxa for remaining lineages, ending at taxon $outi\n" if $debug;
 					last;
 				}
 				$maxlength = max( map { $#{$_} } @nextlinaoa );
-				printf "%d/$totalhits lineages remain for next comparison, new maxlength of $maxlength\n", scalar @nextlinaoa;
+				printf "%d/$totalhits lineages remain for next comparison, new maxlength of $maxlength\n", scalar @nextlinaoa if $debug;
 				@linaoa = @nextlinaoa;
 			}
 			
@@ -871,13 +655,13 @@ sub batch_taxonomyblast{
 			$out{$qid}{prop} = $prop;
 			my @scores = map {${$hits}{$qid}{$_}{score}} @acc_used;
 			$out{$qid}{score} = sum(@scores)/scalar @scores;
-			my @ids = map {${$hits}{$qid}{$_}{id}} @acc_used;
+			my @ids = map {${$hits}{$qid}{$_}{pident}} @acc_used;
 			$out{$qid}{id} = sum(@ids)/scalar @ids;
 			$out{$qid}{topid} = max(@ids);
 		}
 	}
 	system("rm $querypath");
-#	print Dumper \%out;
+	print Dumper \%out if $debug;
 	return \%out;
 }
 
@@ -1040,8 +824,8 @@ sub parse_parameters {
 	foreach my $it (0 .. $#allarray){
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
 		if($iterhash{$it+1}{cluster_method} eq "swarm"){
-			$iterhash{$it+1}{otuassign} = $iterhash{$it+1}{otuassign}*$parameters{seqconv};
-			if($iterhash{$it+1}{otuassign} =~ /\./){
+			$iterhash{$it+1}{cpv} = $iterhash{$it+1}{cpv}*$parameters{seqconv};
+			if($iterhash{$it+1}{cpv} =~ /\./){
 				delete($iterhash{$it+1});
 				$nonint_removed++;
 			}
@@ -1090,7 +874,7 @@ sub convert_uc_and_write {
 	open my $uc, '<', $ucpath or die "Error opening $ucpath\n";
 	while(my $row = <$uc>){
 		chomp $row;
-		if($row =~ /H.*barcodelabel=([^;]+);\t(.*)$/){
+		if($row =~ /^H.*barcodelabel=([^;]+);\t(.*)$/){
 			$tab{$1}{$2}++;
 			$samples{$1}=1;
 			$otus{$2}=1;
