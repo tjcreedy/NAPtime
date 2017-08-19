@@ -118,7 +118,8 @@ my %paramdefaults = (
 	'filter_chimeras'	=> 'no',
 	'minsize'		=> 2,
 	'cluster_method'	=> 'usearch',
-	'cpv'		=> 3,
+	'cpv'			=> 3,
+	'assigned_cpv'		=> 3,
 	'length_var'		=> 1,
 );
 my @params = keys %parameters;
@@ -378,7 +379,7 @@ sub cluster_and_map{
 		my $seqs = `cat $clusterinput | grep -c '^>'`;
 		($nOTUs,$n_chimeras_cluster) = ($seqs-{${$iterations}{$iter}{filter_chimeras} eq "yes"  ? 0 : $n_chimeras_uchime},"NA");
 	} else {
-		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{cpv} on file $clusterinput\n" if $verbose;
+		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{assigned_cpv} on file $clusterinput\n" if $verbose;
 		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
 			my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} 2>&1";
@@ -396,7 +397,7 @@ sub cluster_and_map{
 			my $sed_cmd = "sed -i -e'/^>/ ! s/N/$randbase/g' $clusterinput";
 	#		print $sed_cmd,"\n";
 			system($sed_cmd);
-			my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{cpv} -o $swarmpath -w $otuspath $clusterinput 2>&1";
+			my $cluster_cmd = "swarm -z -t 1 -d ${$iterations}{$iter}{assigned_cpv} -o $swarmpath -w $otuspath $clusterinput 2>&1";
 	#		print $cluster_cmd,"\n";
 			my $cluster_log = `$cluster_cmd`;
 	#		print $cluster_log,"\n";
@@ -421,10 +422,8 @@ sub cluster_and_map{
 	my $idpc;
 	if(${$iterations}{$iter}{cpv} == 0){
 		$idpc=0.99
-	} elsif(${$iterations}{$iter}{cluster_method} eq "usearch"){
-		$idpc=1-(${$iterations}{$iter}{cpv}/100);
 	} else {
-		$idpc =1-(${$iterations}{$iter}{cpv}/(100*${$iterations}{$iter}{seqconv}));
+		$idpc=1-(${$iterations}{$iter}{cpv}/100);
 	}
 	print timestamp(),":$printstring starting mapping all reads to OTUs using id $idpc\n" if $verbose;
 	my $mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1";
