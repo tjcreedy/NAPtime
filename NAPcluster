@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.5.1"; #17/08/17
+my $version = "0.6.0"; #19/08/17
 
 my $help;
 my $outpath;
@@ -57,6 +57,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "length_var=s"	=> \$parameters{length_var},
 	   "cluster_method=s"	=> \$parameters{cluster_method},
 	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
+	   "denoise=s"		=> \$parameters{denoise},
 	   "cpv=s"		=> \$parameters{cpv},
 	   "minsize=s"		=> \$parameters{minsize},
 	   "seqlength=i"	=> \$parameters{seqlength},
@@ -116,6 +117,7 @@ $blastparams{blastthreads} = $threads;
 $mode = "batch" unless(defined $mode);
 my %paramdefaults = (
 	'filter_chimeras'	=> 'no',
+	'denoise'		=> 'yes',
 	'minsize'		=> 2,
 	'cluster_method'	=> 'usearch',
 	'cpv'			=> 3,
@@ -134,6 +136,12 @@ if($parameters{filter_chimeras} eq 'both'){
 	die "Error: value $parameters{filter_chimeras} passed to --filter_chimeras not recognised\n";
 }
 
+if($parameters{denoise} eq 'both'){
+	$parameters{denoise} = "yes,no";
+}elsif($parameters{denoise} ne 'no' and $parameters{denoise} ne 'yes'){
+	die "Error: value $parameters{denoise} passed to --denoise not recognised\n";
+}
+
 $parameters{seqconv} = $parameters{seqlength}/100;
 
 #
@@ -145,13 +153,13 @@ my @n_iter = sort keys %$iterations;
 print "Debug: parsed iteration hash follows:" if $debug;
 print Dumper \$iterations if $debug;
 
-printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded removed for non-integer otu assignment parameter for swarm" : "" if($verbose and $#n_iter>0);
+printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded iterations removed due to redundant cpv assignments" : "" if($verbose and $#n_iter>0);
 
 my %otusets;
 my %stats = (
 	general	=> ['input_sequences','iteration'],
 	derep	=> ['sequence_length','sequence_length_variation_pc','minlength','maxlength','length_discarded','sequences_remain','n_groups','mean_groupsize','min_groupsize','max_groupsize'],
-	size	=> ['n_groups_discarded_<minsize','n_groups_remain'],
+	size	=> ['n_groups_discarded_<minsize','n_groups_discarded_unoise','n_chimeras_unoise','n_groups_remain'],
 	cluster	=> ['n_otus','n_chimeras_uchime','n_chimeras_cluster']
 );
 
@@ -201,24 +209,27 @@ my $bpm_done=0;
 $bpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$bpm_done++;
-	printf "Completed $bpm_done/%d dereplication and size sorting iterations\n",(scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq 'eval';
+	printf "Completed $bpm_done/%d dereplication and size sorting iterations\n",(scalar @{${$expand_parameters}{denoise}} *scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq 'eval';
 	die "Error: size thread failed to output\n" unless $data_structure_reference;
+	my $dns = $data_structure_reference->{dns};
 	my $lvar = $data_structure_reference->{lvar};
 	my $mins = $data_structure_reference->{mins};
-	$sort_log{$lvar}{$mins} = $data_structure_reference->{slog};
-	$derep_log{$lvar}{$mins} = $data_structure_reference->{dlog};
+	$sort_log{$dns}{$lvar}{$mins} = $data_structure_reference->{slog};
+	$derep_log{$dns}{$lvar}{$mins} = $data_structure_reference->{dlog};
 });
 
 print "Starting dereplication and size sorting\n" if $verbose and $mode eq "batch";
-printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
+printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
 
-foreach my $lvar (@{${$expand_parameters}{length_var}}){
-	foreach my $mins (@{${$expand_parameters}{minsize}}){
-		my $pid = $bpm->start and next;
-	
-		my ($dlog,$slog) = derep_sort_write(\%allfasta,$pathroot,$parameters{seqlength},$lvar,$mins,\%stats);
-	
-		$bpm->finish(0, {slog => $slog, dlog => $dlog, lvar => $lvar, mins => $mins});
+foreach my $dns (@{${$expand_parameters}{denoise}}){
+	foreach my $lvar (@{${$expand_parameters}{length_var}}){
+		foreach my $mins (@{${$expand_parameters}{minsize}}){
+			my $pid = $bpm->start and next;
+			
+			my ($dlog,$slog) = derep_sort_write(\%allfasta,$pathroot,$parameters{seqlength},$dns,$lvar,$mins,\%stats);
+			
+			$bpm->finish(0, {slog => $slog, dlog => $dlog, dns => $dns, lvar => $lvar, mins => $mins});
+		}
 	}
 }
 
@@ -306,12 +317,13 @@ my @head = (@{$stats{general}},@params,@{$stats{derep}},@{$stats{size}},@{$stats
 print $logcsv join(',',@head);
 
 foreach my $i (keys %$iterations){
+	my $dns = ${$iterations}{$i}{denoise};
 	my $lvar = ${$iterations}{$i}{length_var};
 	my $mins = ${$iterations}{$i}{minsize};
 	print $logcsv "\n$input_sequences,$i,",
 		join(',',@{$cluster_log{$i}}{@params},
-			@{$derep_log{$lvar}{$mins}}{@{$stats{derep}}},
-			@{$sort_log{$lvar}{$mins}}{@{$stats{size}}},
+			@{$derep_log{$dns}{$lvar}{$mins}}{@{$stats{derep}}},
+			@{$sort_log{$dns}{$lvar}{$mins}}{@{$stats{size}}},
 			@{$cluster_log{$i}}{@{$stats{cluster}}}
 			);
 }
@@ -339,7 +351,8 @@ sub cluster_and_map{
 	# Prepare paths
 	#
 		# Existing paths for source of this iteration
-	my $sortpath = $pathroot."sort_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
+	my $sortpath = $pathroot."sort_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
+	my $denoisepath = $pathroot."denoised_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
 		# New paths
 	$pathroot .= "iteration$iter.";
 	my $chimerapath = $pathroot."chimeras.fa";
@@ -349,16 +362,19 @@ sub cluster_and_map{
 	my $mappath = $pathroot."map.csv";
 	my $swarmpath = $pathroot."swarmotus.csv";
 	
+	my $chimerainput = $denoisepath;
+	$chimerainput = $sortpath if(${$iterations}{$iter}{denoise} eq "no");
+	
 	#
 	# Perform clustering
 	#
-		
+	
 	my $n_chimeras_uchime = "NA";
-	my $clusterinput = $sortpath;
+	my $clusterinput = $chimerainput;
 	if(${$iterations}{$iter}{filter_chimeras} eq "yes" or ${$iterations}{$iter}{filter_chimeras} eq "swarm"){
 		print timestamp(),":$printstring filtering chimeras\n" if $verbose;
 		
-		my $chimera_cmd = "usearch80 -uchime_denovo $sortpath -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
+		my $chimera_cmd = "usearch92 -uchime2_denovo $chimerainput -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
 #		print "Command: $chimera_cmd\n";
 		my $chimera_log = `$chimera_cmd`;
 #		print $fh $chimera_log,"\n";
@@ -382,7 +398,7 @@ sub cluster_and_map{
 		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{assigned_cpv} on file $clusterinput\n" if $verbose;
 		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
-			my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} 2>&1";
+			my $cluster_cmd = "usearch92 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu 2>&1";
 	#		print "Command: $cluster_cmd\n";
 			my $cluster_log = `$cluster_cmd`;
 	#		print $fh $cluster_log,"\n";
@@ -477,16 +493,19 @@ sub cluster_and_map{
 }
 
 sub derep_sort_write{
-	my($allfasta,$pathroot,$len,$lvar,$mins,$stats) = @_;
+	my($allfasta,$pathroot,$len,$dns,$lvar,$mins,$stats) = @_;
 	my $minl = floor($len-($lvar*$len)/100);
 	my $maxl = ceil($len+($lvar*$len)/100);
-	print timestamp(),": starting dereplication and sort iteration with length_var $minl%: $minl-${maxl}bp inclusive, and min group size $mins, pid $$\n" if $verbose;
+	
+	print timestamp(),": starting denoise, dereplication and sort iteration with",$dns eq "yes" ? "":"out"," denoising, length_var $lvar%: $minl-${maxl}bp inclusive, and min group size $mins, pid $$\n", if $verbose;
 	my %dlog;
 	my %slog;
 	
 	my $printstring = join "", $threads>1 ? " pid $$" : "" , " length_var $lvar minsize $mins";
 	
-	my $sortpath = $pathroot."sort_lvar$lvar\_mins$mins.fa";
+	my $sortpath = $pathroot."sort_dns$dns\_lvar$lvar\_mins$mins.fa";
+	my $denoisepath = $pathroot."denoised_dns$dns\_lvar$lvar\_mins$mins.fa";
+	
 	
 	#
 	# Dereplicate all sequences within length variation
@@ -541,7 +560,32 @@ sub derep_sort_write{
 	
 	print timestamp(),":$printstring discarded $minsize_discarded groups, $n_groups_remain remain, written to $sortpath\n" if $verbose;
 	
-	@slog{@{${$stats}{size}}} = ($minsize_discarded,$n_groups_remain);
+		
+	#
+	# Perform denoising
+	#
+	my $nseq_discarded_unoise="NA";
+	my $n_chimeras_unoise="NA";
+	
+	if($dns eq "yes" ){
+		print timestamp(),":$printstring performing unoise\n" if $verbose;
+		
+		my $denoise_cmd = "usearch92 -unoise2 $sortpath -fastaout $denoisepath 2>&1";
+		my $denoise_log = `$denoise_cmd`;
+		$denoise_log =~ s/\r/\n/g;
+		
+		print "Denoise log follows:\n$denoise_log\n" if $debug;
+		
+		$denoise_log =~ /.*\s(\d+)\samplicons,\s(\d+)\sbad.*\s(\d+)\sgood,\s(\d+)\schimeras/s;
+		print "Parsed |$1,$2,$3,$4|\n" if $debug;
+		$nseq_discarded_unoise = $2;
+		$n_chimeras_unoise = $4;
+		$n_groups_remain = $3;
+		
+		print timestamp(),":$printstring completed denoising, $n_groups_remain unique sequences remain, written to $denoisepath\n" if $verbose;
+	}
+	
+	@slog{@{${$stats}{size}}} = ($minsize_discarded,$nseq_discarded_unoise,$n_chimeras_unoise,$n_groups_remain);
 	
 	return(\%dlog,\%slog);
 }
@@ -820,23 +864,24 @@ sub parse_parameters {
 	}
 	my @allarray;
 	NestedLoops([@param_expand{@paramarray}], sub {push @allarray, [ @_ ]});
-#	print Dumper \@allarray;
+	print Dumper \@allarray if $debug;
 	my $nonint_removed;
 	my %iterhash;
-	my %checkswarmcpv;
+	my %hashcompare;
 	foreach my $it (0 .. $#allarray){
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
 		if($iterhash{$it+1}{cluster_method} eq "swarm"){
-			$iterhash{$it+1}{assigned_cpv} = printf("%.0f", $iterhash{$it+1}{cpv}*$parameters{seqconv});
-			$iterhash{$it+1}{cpv} = $iterhash{$it+1}{assigned_cpv}/$parameters{seqconv};
-			if(exists $checkswarmcpv{$iterhash{$it+1}{cpv}}){
+			$iterhash{$it+1}{assigned_cpv} = sprintf( "%.0f", $iterhash{$it+1}{cpv}*$iterhash{$it+1}{seqconv});
+			$iterhash{$it+1}{cpv} = $iterhash{$it+1}{assigned_cpv}/$iterhash{$it+1}{seqconv};
+			if(exists $hashcompare{$iterhash{$it+1}}){
 				delete $iterhash{$it+1};
 				$nonint_removed++;
 			} else {
-				$checkswarmcpv{$iterhash{$it+1}{cpv}} = 1;
+				$hashcompare{$iterhash{$it+1}} = 1;
 			}
 		} else {
-			$iterhash{$it+1}{assigned_cpv} = $iterhash{$it+1}{cpv}
+			$iterhash{$it+1}{assigned_cpv} = $iterhash{$it+1}{cpv};
+			$hashcompare{$iterhash{$it+1}} = 1;
 		}
 	}
 	my $newid = 1;
@@ -867,7 +912,7 @@ sub read_fasta {
 			$id =~ s/\s/_/g;
 		} elsif($row =~ /^[ATCGNatcgn]+$/){
 			$fasta{$id} .= $row;
-		} else { die "Couldn't read fasta format in $fapathin" };
+		} else { die "Couldn't read fasta format in $fapathin\n" };
 	}
 	close $fa_in;
 	print "File $fapathin missing barcode labels, \";barcodelabel=$name;\" appended to header of $barcodelabelsadded sequences\n" if $checklabel and $barcodelabelsadded and $verbose;
