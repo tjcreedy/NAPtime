@@ -823,7 +823,7 @@ sub parse_parameters {
 #	print Dumper \@allarray;
 	my $nonint_removed;
 	my %iterhash;
-	my %checkswarmcpv
+	my %checkswarmcpv;
 	foreach my $it (0 .. $#allarray){
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
 		if($iterhash{$it+1}{cluster_method} eq "swarm"){
