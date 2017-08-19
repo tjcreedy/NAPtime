@@ -57,7 +57,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "length_var=s"	=> \$parameters{length_var},
 	   "cluster_method=s"	=> \$parameters{cluster_method},
 	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
-	   "cpv=s"	=> \$parameters{cpv},
+	   "cpv=s"		=> \$parameters{cpv},
 	   "minsize=s"		=> \$parameters{minsize},
 	   "seqlength=i"	=> \$parameters{seqlength},
 	   "blastpath=s"	=> \$blastparams{blastpath},
@@ -67,7 +67,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "doblast"		=> \$doblast,
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
-	   "debug"			=> \$debug,
+	   "debug"		=> \$debug,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
 #
@@ -824,14 +824,20 @@ sub parse_parameters {
 #	print Dumper \@allarray;
 	my $nonint_removed;
 	my %iterhash;
+	my %checkswarmcpv
 	foreach my $it (0 .. $#allarray){
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
 		if($iterhash{$it+1}{cluster_method} eq "swarm"){
-			$iterhash{$it+1}{cpv} = $iterhash{$it+1}{cpv}*$parameters{seqconv};
-			if($iterhash{$it+1}{cpv} =~ /\./){
-				delete($iterhash{$it+1});
+			$iterhash{$it+1}{assigned_cpv} = printf("%.0f", $iterhash{$it+1}{cpv}*$parameters{seqconv});
+			$iterhash{$it+1}{cpv} = $iterhash{$it+1}{assigned_cpv}/$parameters{seqconv};
+			if(exists $checkswarmcpv{$iterhash{$it+1}{cpv}}){
+				delete $iterhash{$it+1};
 				$nonint_removed++;
+			} else {
+				$checkswarmcpv{$iterhash{$it+1}{cpv}} = 1;
 			}
+		} else {
+			$iterhash{$it+1}{assigned_cpv} = $iterhash{$it+1}{cpv}
 		}
 	}
 	my $newid = 1;
