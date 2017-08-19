@@ -124,8 +124,11 @@ my %paramdefaults = (
 	'assigned_cpv'		=> 3,
 	'length_var'		=> 1,
 );
-my @params = keys %parameters;
+
+my @params = keys %paramdefaults;
 @parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
+
+@params = keys %parameters;
 
 if($parameters{filter_chimeras} eq 'both'){
 	$parameters{filter_chimeras} = "yes,no";
