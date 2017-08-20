@@ -90,7 +90,7 @@ print "Input parameters follow:\n" if $debug;
 print Dumper \%parameters if $debug;
 
 die "Error: please specify --pearquality, see \"$script --help\" for more information\n" if(!defined $parameters{pearquality});
-die "Error: please specify --eemax, see \"$script --help\" for more information\n" if(!defined $parameters{eemax}&!$parameters{noconvert});
+die "Error: please specify --eemax or --noconvert, see \"$script --help\" for more information\n" if(!defined $parameters{eemax}&!$parameters{noconvert});
 
 
 if(!defined $outpath){
