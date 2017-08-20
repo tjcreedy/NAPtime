@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.6.0"; #19/08/17
+my $version = "0.6.1"; #20/08/17
 
 my $help;
 my $outpath;
@@ -58,6 +58,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "cluster_method=s"	=> \$parameters{cluster_method},
 	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
 	   "denoise=s"		=> \$parameters{denoise},
+	   "eemax=s"		=> \$parameters{eemax},
 	   "cpv=s"		=> \$parameters{cpv},
 	   "minsize=s"		=> \$parameters{minsize},
 	   "seqlength=i"	=> \$parameters{seqlength},
@@ -79,15 +80,16 @@ print "$usage\n" and exit if($help);
 die "I need some files to work on, see \"$script --help\" for more information\n" if(scalar @ARGV == 0);
 die "Error: sequence length must be specified\n" unless(defined $parameters{seqlength});
 
+my $pathroot = "$outpath/temp/";
+
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
 } else {
 	print "Creating output directory if needed\n" if $verbose;
-	make_path($outpath);
-	make_path("$outpath/temp/");
 	$outpath =~ s/\/$//;
+	$pathroot = "$outpath/temp/";
+	make_path($pathroot);
 }
-my $pathroot = "$outpath/temp/cluster.";
 
 $verbose = 1 if $debug;
 
@@ -118,6 +120,7 @@ $mode = "batch" unless(defined $mode);
 my %paramdefaults = (
 	'filter_chimeras'	=> 'no',
 	'denoise'		=> 'yes',
+	'eemax'			=> 'NA',
 	'minsize'		=> 2,
 	'cluster_method'	=> 'usearch',
 	'cpv'			=> 3,
@@ -128,7 +131,7 @@ my %paramdefaults = (
 my @params = keys %paramdefaults;
 @parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
 
-@params = keys %parameters;
+@params = sort keys %parameters;
 
 if($parameters{filter_chimeras} eq 'both'){
 	$parameters{filter_chimeras} = "yes,no";
@@ -160,48 +163,61 @@ printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", af
 
 my %otusets;
 my %stats = (
-	general	=> ['input_sequences','iteration'],
-	derep	=> ['sequence_length','sequence_length_variation_pc','minlength','maxlength','length_discarded','sequences_remain','n_groups','mean_groupsize','min_groupsize','max_groupsize'],
+	general	=> ['iteration'],
+	filcat	=> ['files_in','total_unfiltered_readsin','total_reads_qualityfiltered','total_reads_qualitypassed','total_reads_concatenated'],
+	derep	=> ['sequence_length_variation_pc','minlength','maxlength','length_discarded','sequences_remain','n_groups','mean_groupsize','min_groupsize','max_groupsize'],
 	size	=> ['n_groups_discarded_<minsize','n_groups_discarded_unoise','n_chimeras_unoise','n_groups_remain'],
 	cluster	=> ['n_otus','n_chimeras_uchime','n_chimeras_cluster']
 );
 
-#
-# Read in files then output raw
-#
-print "Reading and concatenating all files\n" if $verbose;
-my %allfasta;
-my %samples;
-foreach my $file (@files){
-	my %fasta = read_fasta($file,"check");
-	printf "$file has %d sequences\n", scalar keys %fasta if $debug;
-	warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
-	my ($name,$dir)=fileparse($file);
-	$name =~ s/^(.+)\.[^.]+$/$1/;
-	$samples{$name}=0;
-	@allfasta{keys %fasta} = values %fasta;
-}
 
-printf "Concatenation of %d files has %d sequences\n\n", scalar @files, scalar keys %allfasta;
-#	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
-
-my $allreads_raw = $pathroot."allreads_raw.fa";
-open my $allraw, '>', $allreads_raw;
-foreach my $id (keys %allfasta){
-	print $allraw ">$id\n$allfasta{$id}\n";
-}
-close $allraw;
 
 #
 # Prep for pipeline
 #
-my $input_sequences = scalar keys %allfasta;
-my $errormessage = "You may want to try running with fewer threads, and check that this directory has plenty of space available";
 
+my %samples;
+foreach my $file (@files){
+	my ($dir,$name,$suffix) = fileparse($file);
+	$samples{$name}=0;
+}
+
+#
+# Quality filtering and concatenation
+#
+my %filcat_log;
+
+my $fcpm = Parallel::ForkManager->new($threads);
+my $fcpm_done = 0;
+
+$fcpm->run_on_finish( sub {
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	$fcpm_done++;
+	printf "Completed $fcpm_done/%d%s concatenation iterations\n", scalar @{${$expand_parameters}{eemax}},$parameters{eemax} ne "NA" ? " quality filtering and" : "" if $verbose and $mode eq 'eval';
+	die "Error: filtering and concatenation thread failed to output\n" unless $data_structure_reference;
+	my $eemax = $data_structure_reference->{eemax};
+	$filcat_log{$eemax} = $data_structure_reference->{fclog};
+});
+
+printf "Starting %s concatenation\n", $parameters{eemax} ne "NA" ? "quality filtering and" : "" if $verbose and $mode eq "batch";
+printf "Starting %d%s concatenation iterations using $threads threads \n", scalar @{${$expand_parameters}{eemax}},$parameters{eemax} ne "NA" ? " quality filtering and" : "" if $verbose and $mode eq 'eval';
+
+foreach my $eemax (@{${$expand_parameters}{eemax}}){
+	my $pid = $fcpm->start and next;
+	
+	my ($fclog) = filter_concat(\@files,$pathroot,$eemax,\%stats);
+	
+	$fcpm->finish(0, {fclog => $fclog, eemax => $eemax});
+}
+
+$fcpm->wait_all_children;
+print "\n";
 
 #
 # Do dereplication
 #
+
+$pathroot = $pathroot."cluster.";
 
 my %derep_log;
 my %sort_log;
@@ -214,35 +230,32 @@ $bpm->run_on_finish( sub {
 	$bpm_done++;
 	printf "Completed $bpm_done/%d dereplication and size sorting iterations\n",(scalar @{${$expand_parameters}{denoise}} *scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq 'eval';
 	die "Error: size thread failed to output\n" unless $data_structure_reference;
+	my $eemax = $data_structure_reference->{eemax};
 	my $dns = $data_structure_reference->{dns};
 	my $lvar = $data_structure_reference->{lvar};
 	my $mins = $data_structure_reference->{mins};
-	$sort_log{$dns}{$lvar}{$mins} = $data_structure_reference->{slog};
-	$derep_log{$dns}{$lvar}{$mins} = $data_structure_reference->{dlog};
+	$sort_log{$eemax}{$dns}{$lvar}{$mins} = $data_structure_reference->{slog};
+	$derep_log{$eemax}{$dns}{$lvar}{$mins} = $data_structure_reference->{dlog};
 });
 
 print "Starting dereplication and size sorting\n" if $verbose and $mode eq "batch";
 printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
-
-foreach my $dns (@{${$expand_parameters}{denoise}}){
-	foreach my $lvar (@{${$expand_parameters}{length_var}}){
-		foreach my $mins (@{${$expand_parameters}{minsize}}){
-			my $pid = $bpm->start and next;
-			
-			my ($dlog,$slog) = derep_sort_write(\%allfasta,$pathroot,$parameters{seqlength},$dns,$lvar,$mins,\%stats);
-			
-			$bpm->finish(0, {slog => $slog, dlog => $dlog, dns => $dns, lvar => $lvar, mins => $mins});
+foreach my $eemax (@{${$expand_parameters}{eemax}}){
+	foreach my $dns (@{${$expand_parameters}{denoise}}){
+		foreach my $lvar (@{${$expand_parameters}{length_var}}){
+			foreach my $mins (@{${$expand_parameters}{minsize}}){
+				my $pid = $bpm->start and next;
+				
+				my ($dlog,$slog) = derep_sort_write($eemax,$pathroot,$parameters{seqlength},$dns,$lvar,$mins,\%stats);
+				
+				$bpm->finish(0, {slog => $slog, dlog => $dlog, dns => $dns, lvar => $lvar, mins => $mins, eemax => $eemax});
+			}
 		}
 	}
 }
 
 $bpm->wait_all_children;
 print "\n";
-
-# Can clear allfasta from memory now
-undef %allfasta;
-
-
 
 #
 # Do clustering and mapping pipeline
@@ -268,7 +281,7 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (keys %$iterations){;
 	my $pid = $pm->start and next;
 	
-	my ($log,$otus) = cluster_and_map($allreads_raw,$pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs,\%samples);
+	my ($log,$otus) = cluster_and_map($pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs,\%samples);
 	
 	$pm->finish(0, {log => $log, otus => $otus, iter => $iter});
 }
@@ -315,18 +328,28 @@ if($doblast){
 my $logpath = "$outpath/cluster.$mode.log.csv";
 open my $logcsv, '>',$logpath ;
 
-my @head = (@{$stats{general}},@params,@{$stats{derep}},@{$stats{size}},@{$stats{cluster}});
+my @head = (@{$stats{general}},@params,@{$stats{filcat}},@{$stats{derep}},@{$stats{size}},@{$stats{cluster}});
+
+
+print Dumper \%stats if $debug;
+print Dumper \@params if $debug;
+print Dumper \%cluster_log if $debug;
+print Dumper \%filcat_log if $debug;
+print Dumper \%derep_log if $debug;
+print Dumper \%sort_log if $debug;
 
 print $logcsv join(',',@head);
 
 foreach my $i (keys %$iterations){
+	my $eemax = ${$iterations}{$i}{eemax};
 	my $dns = ${$iterations}{$i}{denoise};
 	my $lvar = ${$iterations}{$i}{length_var};
 	my $mins = ${$iterations}{$i}{minsize};
-	print $logcsv "\n$input_sequences,$i,",
+	print $logcsv "\n$i,",
 		join(',',@{$cluster_log{$i}}{@params},
-			@{$derep_log{$dns}{$lvar}{$mins}}{@{$stats{derep}}},
-			@{$sort_log{$dns}{$lvar}{$mins}}{@{$stats{size}}},
+			@{$filcat_log{$eemax}}{@{$stats{filcat}}},
+			@{$derep_log{$eemax}{$dns}{$lvar}{$mins}}{@{$stats{derep}}},
+			@{$sort_log{$eemax}{$dns}{$lvar}{$mins}}{@{$stats{size}}},
 			@{$cluster_log{$i}}{@{$stats{cluster}}}
 			);
 }
@@ -340,8 +363,195 @@ print "\nCSV log successfully written to $logpath\n" if $verbose;
 
 exit;
 
+sub filter_concat{
+	my ($files,$pathroot,$eemax,$stats) = @_;
+	print timestamp(),": starting concatenation iteration with",$eemax ne "NA" ? " filtering at eemax $eemax":"out filtering",", pid $$\n", if $verbose;
+	
+	my $filterpath = $pathroot."filter_e$eemax/";
+	make_path($filterpath);
+	
+	#
+	# Quality filter files
+	#
+	my $files_in = scalar @files;
+	my ($total_readsin,$total_readsdiscarded,$total_readspassed);
+	my @filteredfiles;
+	if($eemax ne "NA"){
+		
+		printf timestamp(),": starting filtering %s files, pid $$\n", scalar @files if $verbose;
+		
+		open my $fillog, '>', $pathroot."filter_log_e$eemax.csv";
+		print $fillog "file,reads,discarded,passed\n";
+		
+		foreach my $file (@$files){
+			my ($name,$dir,$suffix) = fileparse($file);
+			my $filterfile = "$filterpath$name.fa";
+			push @filteredfiles, $filterfile;
+			my $filter_cmd = "usearch92 -fastq_filter $file -fastaout $filterfile -fastq_maxee $eemax 2>&1 1>/dev/null";
+			#print "Filter command:\n$filter_cmd\n" if $debug;
+			
+			my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
+			$filter_log =~ s/\r/\n/g;
+			#print "Filter log:\n$filter_log\n" if $debug;
+			
+			if($filter_log=~ /.*\s(\d+)\s+Reads.+\s(\d+)\s+Discarded.+\s(\d+)\s+Filtered/s){ #regex to extract data
+				print $fillog "$name,$1,$2,$3\n";
+				$total_readsin += $1;
+				$total_readsdiscarded += $2;
+				$total_readspassed += $3;
+			} elsif($filter_log=~ /Fatal\serror/) {
+				die "Filtering failed for file $file, are you sure it's a FASTQ file? Do not set eemax if running with FASTA files\n" if($filter_log =~ /errno=34/);
+				die "Filtering failed for file $file\n";
+			}
+		}
+	} else {
+		@filteredfiles = @$files;
+		($total_readsin,$total_readsdiscarded,$total_readspassed) = ("NA" x 3);
+	}
+	
+	#
+	# Read in files then output raw
+	#
+	print timestamp(),": reading and concatenating files, pid $$\n" if $verbose;
+	my %allfasta;
+	foreach my $file (@filteredfiles){
+		my %fasta = read_fasta($file,"check");
+	#	printf "$file has %d sequences\n", scalar keys %fasta if $debug;
+		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
+		my ($name,$dir)=fileparse($file);
+		$name =~ s/^(.+)\.[^.]+$/$1/;
+		@allfasta{keys %fasta} = values %fasta;
+	}
+	
+	my $concat_reads = scalar keys %allfasta;
+	
+	print timestamp(),": concatenation of $files_in files has $concat_reads sequences\n\n" if $verbose;
+	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
+
+	my $allreads_raw = "$outpath/cluster.allreads_raw_e$eemax.fa";
+	open my $allraw, '>', $allreads_raw;
+	foreach my $id (keys %allfasta){
+		print $allraw ">$id\n$allfasta{$id}\n";
+	}
+	close $allraw;
+	
+	store \%allfasta, "${pathroot}cluster.raw_e$eemax.hash";
+	print "Stored concatenated reads fasta in ${pathroot}cluster.raw_e$eemax.hash\n" if $debug;
+	undef %allfasta;
+	
+	#
+	# Do logging
+	#
+	
+	my %log;
+	@log{@{${$stats}{filcat}}} = ($files_in,$total_readsin,$total_readsdiscarded,$total_readspassed,$concat_reads);
+	return \%log;
+}
+
+
+sub derep_sort_write{
+	my($eemax,$pathroot,$len,$dns,$lvar,$mins,$stats) = @_;
+	my $minl = floor($len-($lvar*$len)/100);
+	my $maxl = ceil($len+($lvar*$len)/100);
+	
+	print timestamp(),": starting dereplication, sort and denoising iteration with",$dns eq "yes" ? "":"out"," denoising, length_var $lvar%: $minl-${maxl}bp inclusive, and min group size $mins, pid $$\n", if $verbose;
+	my %dlog;
+	my %slog;
+	
+	my $printstring = join "", $threads>1 ? " pid $$" : "" , " eemax $eemax denoise $dns length_var $lvar minsize $mins";
+	
+	my $sortpath = $pathroot."sort_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
+	my $denoisepath = $pathroot."denoised_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
+	
+	my $allfasta = retrieve("${pathroot}raw_e$eemax.hash");
+	
+	#
+	# Dereplicate all sequences within length variation
+	#
+	my $length_discarded = 0;
+	my $length_passed = 0;
+	my %dereplicated;
+	foreach my $id (keys %$allfasta){
+		if(length(${$allfasta}{$id})>=$minl and length(${$allfasta}{$id})<=$maxl){
+			$dereplicated{${$allfasta}{$id}}++;
+			$length_passed++;
+		} else {
+			$length_discarded++;
+		}
+	}
+	
+	#
+	# Calculate statistics
+	#
+	my @groupsizes = values %dereplicated;
+	my %sizecount;
+	foreach my $size (@groupsizes){
+		$sizecount{$size}++;
+	}
+	my $ngroup = scalar keys %dereplicated;
+	my $singletons  = $sizecount{1} ? $sizecount{1} : 0;
+	my $minsize = min(@groupsizes);
+	my $topsize = max(@groupsizes);
+	my $mean_groupsize = $length_passed/$ngroup;
+	
+	@dlog{@{${$stats}{derep}}} = ($lvar,$minl,$maxl,$length_discarded,$length_passed,$ngroup,$mean_groupsize,$minsize,$topsize);
+	
+	print timestamp(),":$printstring discarded $length_discarded sequences <${minl}bp or >${maxl}bp, $length_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
+	
+	#
+	# Output sequences size sorted
+	#
+	my @sorted_seqs = sort { $dereplicated{$b} <=> $dereplicated{$a} } keys %dereplicated;
+	open my $sorted, '>', $sortpath;
+	my $bigenough = 0;
+	foreach my $seq (@sorted_seqs){
+		if($dereplicated{$seq}>=$mins){
+			$bigenough++;
+			print $sorted ">sequence$bigenough;size=$dereplicated{$seq};\n$seq\n";
+		} else {
+			last;
+		}
+	}
+	
+	my $n_groups_remain = $bigenough;
+	my $minsize_discarded = $ngroup - $n_groups_remain;
+	
+	print timestamp(),":$printstring discarded $minsize_discarded groups, $n_groups_remain remain, written to $sortpath\n" if $verbose;
+	
+	
+	#
+	# Perform denoising
+	#
+	
+	my $nseq_discarded_unoise="NA";
+	my $n_chimeras_unoise="NA";
+	
+	if($dns eq "yes" ){
+		print timestamp(),":$printstring performing unoise\n" if $verbose;
+		
+		my $denoise_cmd = "usearch92 -unoise2 $sortpath -fastaout $denoisepath 2>&1";
+		my $denoise_log = `$denoise_cmd`;
+		$denoise_log =~ s/\r/\n/g;
+		
+		print "Denoise log follows:\n$denoise_log\n" if $debug;
+		
+		$denoise_log =~ /.*\s(\d+)\samplicons,\s(\d+)\sbad.*\s(\d+)\sgood,\s(\d+)\schimeras/s;
+		print "Parsed |$1,$2,$3,$4|\n" if $debug;
+		$nseq_discarded_unoise = $2;
+		$n_chimeras_unoise = $4;
+		$n_groups_remain = $3;
+		
+		print timestamp(),":$printstring completed denoising, $n_groups_remain unique sequences remain, written to $denoisepath\n" if $verbose;
+	}
+	
+	@slog{@{${$stats}{size}}} = ($minsize_discarded,$nseq_discarded_unoise,$n_chimeras_unoise,$n_groups_remain);
+	
+	return(\%dlog,\%slog);
+}
+
+
 sub cluster_and_map{
-	my ($allreads_raw,$pathroot,$iterations,$iter,$params,$stats,$maxmapseqs,$samples) = @_;
+	my ($pathroot,$iterations,$iter,$params,$stats,$maxmapseqs,$samples) = @_;
 	
 	my %log;
 	
@@ -354,8 +564,8 @@ sub cluster_and_map{
 	# Prepare paths
 	#
 		# Existing paths for source of this iteration
-	my $sortpath = $pathroot."sort_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
-	my $denoisepath = $pathroot."denoised_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
+	my $sortpath = $pathroot."sort_eemax${$iterations}{$iter}{eemax}_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
+	my $denoisepath = $pathroot."denoised_eemax${$iterations}{$iter}{eemax}_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
 		# New paths
 	$pathroot .= "iteration$iter.";
 	my $chimerapath = $pathroot."chimeras.fa";
@@ -369,26 +579,28 @@ sub cluster_and_map{
 	$chimerainput = $sortpath if(${$iterations}{$iter}{denoise} eq "no");
 	
 	#
-	# Perform clustering
+	# Perform chimera filtering
 	#
 	
 	my $n_chimeras_uchime = "NA";
 	my $clusterinput = $chimerainput;
 	if(${$iterations}{$iter}{filter_chimeras} eq "yes" or ${$iterations}{$iter}{filter_chimeras} eq "swarm"){
-		print timestamp(),":$printstring filtering chimeras\n" if $verbose;
-		
-		my $chimera_cmd = "usearch92 -uchime2_denovo $chimerainput -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
-#		print "Command: $chimera_cmd\n";
-		my $chimera_log = `$chimera_cmd`;
-#		print $fh $chimera_log,"\n";
-
-#		print "Log:\n$chimera_log\n";
-		$chimera_log =~ /Writing\s(\d+)\schimeras/;
-		$n_chimeras_uchime = $1;
-#		print "uchime chimeras: $1\n";
-		$clusterinput = $nonchimerapath;
-		
-		print timestamp(),":$printstring completed filtering $n_chimeras_uchime chimeras, written to $nonchimerapath\n" if $verbose;
+		if(${$iterations}{$iter}{denoise} eq "yes"){
+			print timestamp(),":$printstring filtering chimeras already performed by denoising, skipping\n" if $verbose;
+		} else {
+			print timestamp(),":$printstring filtering chimeras\n" if $verbose;
+			
+			my $chimera_cmd = "usearchx -uchime2_denovo $chimerainput -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
+			print "Command: $chimera_cmd\n" if $debug;
+			my $chimera_log = `$chimera_cmd`;
+			$chimera_log =~ s/\r/\n/g ;
+			print "Log:\n$chimera_log\n" if $debug;
+			$chimera_log =~ /.*,\s(\d+)\schimeras/;
+			$n_chimeras_uchime = $1;
+			$clusterinput = $nonchimerapath;
+			
+			print timestamp(),":$printstring completed filtering $n_chimeras_uchime chimeras, written to $nonchimerapath\n" if $verbose;
+		}
 	}
 	
 	my ($nOTUs,$n_chimeras_cluster);
@@ -402,10 +614,10 @@ sub cluster_and_map{
 		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
 			my $cluster_cmd = "usearch92 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu 2>&1";
-	#		print "Command: $cluster_cmd\n";
+			print "Command: $cluster_cmd\n" if $debug;
 			my $cluster_log = `$cluster_cmd`;
 	#		print $fh $cluster_log,"\n";
-	#		print "Log:\n$cluster_log\n";
+			print "Log:\n$cluster_log\n" if $debug;
 			$cluster_log =~ /.*\s(\d+)\sOTUs,\s(\d+)\schimeras/s; #.* at beginning of regex ensures last OTU and chimera values selected (the function prints multiple lines of progress using \r!)
 	#		print "cluster chimeras: $2\n";
 			($nOTUs,$n_chimeras_cluster) = ($1,$2);
@@ -437,6 +649,8 @@ sub cluster_and_map{
 	#
 	# Map OTUs
 	#
+	
+	my $allreads_raw = "$outpath/cluster.allreads_raw_e${$iterations}{$iter}{eemax}.fa";
 	
 	my $idpc;
 	if(${$iterations}{$iter}{cpv} == 0){
@@ -493,104 +707,6 @@ sub cluster_and_map{
 	print timestamp(),":$printstring completed\n" if $verbose;
 	
 	return (\%log,\%otus_rev);
-}
-
-sub derep_sort_write{
-	my($allfasta,$pathroot,$len,$dns,$lvar,$mins,$stats) = @_;
-	my $minl = floor($len-($lvar*$len)/100);
-	my $maxl = ceil($len+($lvar*$len)/100);
-	
-	print timestamp(),": starting denoise, dereplication and sort iteration with",$dns eq "yes" ? "":"out"," denoising, length_var $lvar%: $minl-${maxl}bp inclusive, and min group size $mins, pid $$\n", if $verbose;
-	my %dlog;
-	my %slog;
-	
-	my $printstring = join "", $threads>1 ? " pid $$" : "" , " length_var $lvar minsize $mins";
-	
-	my $sortpath = $pathroot."sort_dns$dns\_lvar$lvar\_mins$mins.fa";
-	my $denoisepath = $pathroot."denoised_dns$dns\_lvar$lvar\_mins$mins.fa";
-	
-	
-	#
-	# Dereplicate all sequences within length variation
-	#
-	my $length_discarded = 0;
-	my $length_passed = 0;
-	my %dereplicated;
-	foreach my $id (keys %$allfasta){
-		if(length(${$allfasta}{$id})>=$minl and length(${$allfasta}{$id})<=$maxl){
-			$dereplicated{${$allfasta}{$id}}++;
-			$length_passed++;
-		} else {
-			$length_discarded++;
-		}
-	}
-	
-	#
-	# Calculate statistics
-	#
-	my @groupsizes = values %dereplicated;
-	my %sizecount;
-	foreach my $size (@groupsizes){
-		$sizecount{$size}++;
-	}
-	my $ngroup = scalar keys %dereplicated;
-	my $singletons  = $sizecount{1} ? $sizecount{1} : 0;
-	my $minsize = min(@groupsizes);
-	my $topsize = max(@groupsizes);
-	my $mean_groupsize = $length_passed/$ngroup;
-	
-	@dlog{@{${$stats}{derep}}} = ($len,$lvar,$minl,$maxl,$length_discarded,$length_passed,$ngroup,$mean_groupsize,$minsize,$topsize);
-	
-	print timestamp(),":$printstring discarded $length_discarded sequences <${minl}bp or >${maxl}bp, $length_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
-	
-	#
-	# Output sequences size sorted
-	#
-	my @sorted_seqs = sort { $dereplicated{$b} <=> $dereplicated{$a} } keys %dereplicated;
-	open my $sorted, '>', $sortpath;
-	my $bigenough = 0;
-	foreach my $seq (@sorted_seqs){
-		if($dereplicated{$seq}>=$mins){
-			$bigenough++;
-			print $sorted ">sequence$bigenough;size=$dereplicated{$seq};\n$seq\n";
-		} else {
-			last;
-		}
-	}
-	
-	my $n_groups_remain = $bigenough;
-	my $minsize_discarded = $ngroup - $n_groups_remain;
-	
-	print timestamp(),":$printstring discarded $minsize_discarded groups, $n_groups_remain remain, written to $sortpath\n" if $verbose;
-	
-		
-	#
-	# Perform denoising
-	#
-	my $nseq_discarded_unoise="NA";
-	my $n_chimeras_unoise="NA";
-	
-	if($dns eq "yes" ){
-		print timestamp(),":$printstring performing unoise\n" if $verbose;
-		
-		my $denoise_cmd = "usearch92 -unoise2 $sortpath -fastaout $denoisepath 2>&1";
-		my $denoise_log = `$denoise_cmd`;
-		$denoise_log =~ s/\r/\n/g;
-		
-		print "Denoise log follows:\n$denoise_log\n" if $debug;
-		
-		$denoise_log =~ /.*\s(\d+)\samplicons,\s(\d+)\sbad.*\s(\d+)\sgood,\s(\d+)\schimeras/s;
-		print "Parsed |$1,$2,$3,$4|\n" if $debug;
-		$nseq_discarded_unoise = $2;
-		$n_chimeras_unoise = $4;
-		$n_groups_remain = $3;
-		
-		print timestamp(),":$printstring completed denoising, $n_groups_remain unique sequences remain, written to $denoisepath\n" if $verbose;
-	}
-	
-	@slog{@{${$stats}{size}}} = ($minsize_discarded,$nseq_discarded_unoise,$n_chimeras_unoise,$n_groups_remain);
-	
-	return(\%dlog,\%slog);
 }
 
 sub batch_taxonomyblast{
