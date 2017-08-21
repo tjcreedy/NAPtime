@@ -133,6 +133,12 @@ my @params = keys %paramdefaults;
 
 @params = sort keys %parameters;
 
+if($parameters{cluster_method} eq 'both'){
+	$parameters{cluster_method} = "usearch,swarm";
+}elsif($parameters{cluster_method} ne 'usearch' & $parameters{cluster_method} ne 'swarm'){
+	die "Error: cluster method \'$parameters{cluster_method}\' not recognised, , see \"$script --help\" for more information\n";
+}
+
 if($parameters{filter_chimeras} eq 'both'){
 	$parameters{filter_chimeras} = "yes,no";
 	warn "\nWarning: cluster_method \"swarm\" does no chimera filtering\n" if $parameters{cluster_method} =~ /swarm/;
