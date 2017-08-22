@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.6.1"; #20/08/17
+my $version = "0.6.2"; #22/08/17
 
 my $help;
 my $outpath;
@@ -247,17 +247,19 @@ $bpm->run_on_finish( sub {
 print "Starting dereplication and size sorting\n" if $verbose and $mode eq "batch";
 printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
 foreach my $eemax (@{${$expand_parameters}{eemax}}){
+	my $allfasta = retrieve("${pathroot}raw_e$eemax.hash");
 	foreach my $dns (@{${$expand_parameters}{denoise}}){
 		foreach my $lvar (@{${$expand_parameters}{length_var}}){
 			foreach my $mins (@{${$expand_parameters}{minsize}}){
 				my $pid = $bpm->start and next;
 				
-				my ($dlog,$slog) = derep_sort_write($eemax,$pathroot,$parameters{seqlength},$dns,$lvar,$mins,\%stats);
+				my ($dlog,$slog) = derep_sort_write($allfasta,$eemax,$pathroot,$parameters{seqlength},$dns,$lvar,$mins,\%stats);
 				
 				$bpm->finish(0, {slog => $slog, dlog => $dlog, dns => $dns, lvar => $lvar, mins => $mins, eemax => $eemax});
 			}
 		}
 	}
+	undef $allfasta;
 }
 
 $bpm->wait_all_children;
@@ -456,7 +458,7 @@ sub filter_concat{
 
 
 sub derep_sort_write{
-	my($eemax,$pathroot,$len,$dns,$lvar,$mins,$stats) = @_;
+	my($allfasta,$eemax,$pathroot,$len,$dns,$lvar,$mins,$stats) = @_;
 	my $minl = floor($len-($lvar*$len)/100);
 	my $maxl = ceil($len+($lvar*$len)/100);
 	
@@ -468,8 +470,6 @@ sub derep_sort_write{
 	
 	my $sortpath = $pathroot."sort_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
 	my $denoisepath = $pathroot."denoised_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
-	
-	my $allfasta = retrieve("${pathroot}raw_e$eemax.hash");
 	
 	#
 	# Dereplicate all sequences within length variation
