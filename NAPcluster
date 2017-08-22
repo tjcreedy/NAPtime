@@ -219,13 +219,30 @@ foreach my $eemax (@{${$expand_parameters}{eemax}}){
 $fcpm->wait_all_children;
 print "\n";
 
-#
-# Do dereplication
-#
-
 $pathroot = $pathroot."cluster.";
 
+#
+# Do dereplication in serial
+#
+
+my %allfasta;
 my %derep_log;
+my $derep_it;
+foreach my $eemax (@{${$expand_parameters}{eemax}}){
+	my $raw = retrieve("${pathroot}raw_e$eemax.hash");
+	foreach my $lvar (@{${$expand_parameters}{length_var}}){
+		$derep_it++;
+		($allfasta{$eemax}{$lvar},$derep_log{$eemax}{$lvar}) = derep($raw,$eemax,$lvar,$derep_it,$parameters{seqlength},\%stats);
+	}
+	undef $raw;
+}
+
+
+#
+# Do denoising and size sorting
+#
+
+
 my %sort_log;
 
 my $bpm = Parallel::ForkManager->new($threads);
@@ -241,25 +258,22 @@ $bpm->run_on_finish( sub {
 	my $lvar = $data_structure_reference->{lvar};
 	my $mins = $data_structure_reference->{mins};
 	$sort_log{$eemax}{$dns}{$lvar}{$mins} = $data_structure_reference->{slog};
-	$derep_log{$eemax}{$dns}{$lvar}{$mins} = $data_structure_reference->{dlog};
 });
 
 print "Starting dereplication and size sorting\n" if $verbose and $mode eq "batch";
 printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
 foreach my $eemax (@{${$expand_parameters}{eemax}}){
-	my $allfasta = retrieve("${pathroot}raw_e$eemax.hash");
-	foreach my $dns (@{${$expand_parameters}{denoise}}){
-		foreach my $lvar (@{${$expand_parameters}{length_var}}){
+	foreach my $lvar (@{${$expand_parameters}{length_var}}){
+		foreach my $dns (@{${$expand_parameters}{denoise}}){
 			foreach my $mins (@{${$expand_parameters}{minsize}}){
 				my $pid = $bpm->start and next;
 				
-				my ($dlog,$slog) = derep_sort_write($allfasta,$eemax,$pathroot,$parameters{seqlength},$dns,$lvar,$mins,\%stats);
+				my ($slog) = derep_sort_write($allfasta{$eemax}{$lvar},$eemax,$pathroot,$dns,$lvar,$mins,\%stats);
 				
-				$bpm->finish(0, {slog => $slog, dlog => $dlog, dns => $dns, lvar => $lvar, mins => $mins, eemax => $eemax});
+				$bpm->finish(0, {slog => $slog, dns => $dns, lvar => $lvar, mins => $mins, eemax => $eemax});
 			}
 		}
 	}
-	undef $allfasta;
 }
 
 $bpm->wait_all_children;
@@ -356,7 +370,7 @@ foreach my $i (keys %$iterations){
 	print $logcsv "\n$i,",
 		join(',',@{$cluster_log{$i}}{@params},
 			@{$filcat_log{$eemax}}{@{$stats{filcat}}},
-			@{$derep_log{$eemax}{$dns}{$lvar}{$mins}}{@{$stats{derep}}},
+			@{$derep_log{$eemax}{$lvar}}{@{$stats{derep}}},
 			@{$sort_log{$eemax}{$dns}{$lvar}{$mins}}{@{$stats{size}}},
 			@{$cluster_log{$i}}{@{$stats{cluster}}}
 			);
@@ -456,20 +470,13 @@ sub filter_concat{
 	return \%log;
 }
 
-
-sub derep_sort_write{
-	my($allfasta,$eemax,$pathroot,$len,$dns,$lvar,$mins,$stats) = @_;
+sub derep{
+	my ($raw,$eemax,$lvar,$derep_it,$len,$stats) = @_;
 	my $minl = floor($len-($lvar*$len)/100);
 	my $maxl = ceil($len+($lvar*$len)/100);
 	
-	print timestamp(),": starting dereplication, sort and denoising iteration with",$dns eq "yes" ? "":"out"," denoising, length_var $lvar%: $minl-${maxl}bp inclusive, and min group size $mins, pid $$\n", if $verbose;
+	print timestamp(),": starting serial dereplication iteration $derep_it with length_var $lvar%: $minl-${maxl}bp inclusive\n", if $verbose;
 	my %dlog;
-	my %slog;
-	
-	my $printstring = join "", $threads>1 ? " pid $$" : "" , " eemax $eemax denoise $dns length_var $lvar minsize $mins";
-	
-	my $sortpath = $pathroot."sort_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
-	my $denoisepath = $pathroot."denoised_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
 	
 	#
 	# Dereplicate all sequences within length variation
@@ -477,14 +484,17 @@ sub derep_sort_write{
 	my $length_discarded = 0;
 	my $length_passed = 0;
 	my %dereplicated;
-	foreach my $id (keys %$allfasta){
-		if(length(${$allfasta}{$id})>=$minl and length(${$allfasta}{$id})<=$maxl){
-			$dereplicated{${$allfasta}{$id}}++;
+	foreach my $id (keys %$raw){
+		if(length(${$raw}{$id})>=$minl and length(${$raw}{$id})<=$maxl){
+			$dereplicated{${$raw}{$id}}++;
 			$length_passed++;
 		} else {
 			$length_discarded++;
 		}
+		delete ${$raw}{$id};
 	}
+	
+	undef $raw;
 	
 	#
 	# Calculate statistics
@@ -502,18 +512,34 @@ sub derep_sort_write{
 	
 	@dlog{@{${$stats}{derep}}} = ($lvar,$minl,$maxl,$length_discarded,$length_passed,$ngroup,$mean_groupsize,$minsize,$topsize);
 	
-	print timestamp(),":$printstring discarded $length_discarded sequences <${minl}bp or >${maxl}bp, $length_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
+	print timestamp(),": discarded $length_discarded sequences <${minl}bp or >${maxl}bp, $length_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
+	return (\%dereplicated,\%dlog);
+}
+
+sub sort_write_denoise{
+	my($dereplicated,$eemax,$pathroot,$dns,$lvar,$mins,$stats) = @_;
+	
+	my %slog;
+	
+	my $printstring = join "", $threads>1 ? " pid $$" : "" , " eemax $eemax denoise $dns length_var $lvar minsize $mins";
+	
+	my $sortpath = $pathroot."sort_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
+	my $denoisepath = $pathroot."denoised_eemax$eemax\_dns$dns\_lvar$lvar\_mins$mins.fa";
+	
+	my $ngroup = scalar keys %$dereplicated;
+	
+	printf timestamp(), " : starting size sorting iteration with min size $mins%s, pid $$\n", $eemax eq "NA" ? " without denoising" : "with denoising", if $verbose;
 	
 	#
 	# Output sequences size sorted
 	#
-	my @sorted_seqs = sort { $dereplicated{$b} <=> $dereplicated{$a} } keys %dereplicated;
+	my @sorted_seqs = sort { ${$dereplicated}{$b} <=> ${$dereplicated}{$a} } keys %$dereplicated;
 	open my $sorted, '>', $sortpath;
 	my $bigenough = 0;
 	foreach my $seq (@sorted_seqs){
-		if($dereplicated{$seq}>=$mins){
+		if(${$dereplicated}{$seq}>=$mins){
 			$bigenough++;
-			print $sorted ">sequence$bigenough;size=$dereplicated{$seq};\n$seq\n";
+			print $sorted ">sequence$bigenough;size=${$dereplicated}{$seq};\n$seq\n";
 		} else {
 			last;
 		}
@@ -552,7 +578,7 @@ sub derep_sort_write{
 	
 	@slog{@{${$stats}{size}}} = ($minsize_discarded,$nseq_discarded_unoise,$n_chimeras_unoise,$n_groups_remain);
 	
-	return(\%dlog,\%slog);
+	return(\%slog);
 }
 
 
@@ -619,7 +645,7 @@ sub cluster_and_map{
 		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{assigned_cpv} on file $clusterinput\n" if $verbose;
 		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
-			my $cluster_cmd = "usearch92 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu 2>&1";
+			my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu 2>&1";
 			print "Command: $cluster_cmd\n" if $debug;
 			my $cluster_log = `$cluster_cmd`;
 	#		print $fh $cluster_log,"\n";
