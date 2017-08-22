@@ -268,7 +268,7 @@ foreach my $eemax (@{${$expand_parameters}{eemax}}){
 			foreach my $mins (@{${$expand_parameters}{minsize}}){
 				my $pid = $bpm->start and next;
 				
-				my ($slog) = derep_sort_write($allfasta{$eemax}{$lvar},$eemax,$pathroot,$dns,$lvar,$mins,\%stats);
+				my ($slog) = sort_write_denoise($allfasta{$eemax}{$lvar},$eemax,$pathroot,$dns,$lvar,$mins,\%stats);
 				
 				$bpm->finish(0, {slog => $slog, dns => $dns, lvar => $lvar, mins => $mins, eemax => $eemax});
 			}
