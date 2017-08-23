@@ -137,7 +137,7 @@ my @params = keys %paramdefaults;
 
 if($parameters{cluster_method} eq 'both'){
 	$parameters{cluster_method} = "usearch,swarm";
-}elsif($parameters{cluster_method} = 'usearch' & $parameters{cluster_method} ne 'swarm'){
+}elsif($parameters{cluster_method} = 'usearch' and $parameters{cluster_method} ne 'swarm'){
 	die "Error: cluster method \'$parameters{cluster_method}\' not recognised (perhaps you meant \"both\", see \"$script --help\" for more information\n";
 }
 
