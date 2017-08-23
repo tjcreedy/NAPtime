@@ -57,6 +57,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "length_var=s"	=> \$parameters{length_var},
 	   "cluster_method=s"	=> \$parameters{cluster_method},
 	   "filter_chimeras=s"	=> \$parameters{filter_chimeras},
+	   "usearch_version=s"	=> \$parameters{usearch_version},
 	   "denoise=s"		=> \$parameters{denoise},
 	   "eemax=s"		=> \$parameters{eemax},
 	   "cpv=s"		=> \$parameters{cpv},
@@ -118,6 +119,7 @@ $blastparams{blastthreads} = $threads;
 # Set defaults
 $mode = "batch" unless(defined $mode);
 my %paramdefaults = (
+	'usearch_version'	=> 80,
 	'filter_chimeras'	=> 'no',
 	'denoise'		=> 'yes',
 	'eemax'			=> 'NA',
@@ -135,8 +137,8 @@ my @params = keys %paramdefaults;
 
 if($parameters{cluster_method} eq 'both'){
 	$parameters{cluster_method} = "usearch,swarm";
-}elsif($parameters{cluster_method} ne 'usearch' & $parameters{cluster_method} ne 'swarm'){
-	die "Error: cluster method \'$parameters{cluster_method}\' not recognised, , see \"$script --help\" for more information\n";
+}elsif($parameters{cluster_method} = 'usearch' & $parameters{cluster_method} ne 'swarm'){
+	die "Error: cluster method \'$parameters{cluster_method}\' not recognised (perhaps you meant \"both\", see \"$script --help\" for more information\n";
 }
 
 if($parameters{filter_chimeras} eq 'both'){
@@ -162,8 +164,8 @@ $parameters{seqconv} = $parameters{seqlength}/100;
 my ($iterations,$expand_parameters,$n_discarded) = parse_parameters($mode,\%parameters);
 my @n_iter = sort keys %$iterations;
 
-print "Debug: parsed iteration hash follows:" if $debug;
-print Dumper \$iterations if $debug;
+#print "Debug: parsed iteration hash follows:" if $debug;
+#print Dumper \$iterations if $debug;
 
 printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded iterations removed due to redundant cpv assignments" : "" if($verbose and $#n_iter>0);
 
@@ -219,8 +221,6 @@ foreach my $eemax (@{${$expand_parameters}{eemax}}){
 $fcpm->wait_all_children;
 print "\n";
 
-$pathroot = $pathroot."cluster.";
-
 #
 # Do dereplication in serial
 #
@@ -237,6 +237,8 @@ foreach my $eemax (@{${$expand_parameters}{eemax}}){
 	undef $raw;
 }
 
+
+$pathroot = $pathroot."cluster.";
 
 #
 # Do denoising and size sorting
@@ -260,8 +262,8 @@ $bpm->run_on_finish( sub {
 	$sort_log{$eemax}{$dns}{$lvar}{$mins} = $data_structure_reference->{slog};
 });
 
-print "Starting dereplication and size sorting\n" if $verbose and $mode eq "batch";
-printf "Starting %d dereplication and size sorting iterations using $threads threads \n", (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
+print "\nStarting size sorting and denoising\n\n" if $verbose and $mode eq "batch";
+printf "\nStarting %d size sorting  and denoisingiterations using $threads threads\nc\n", (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
 foreach my $eemax (@{${$expand_parameters}{eemax}}){
 	foreach my $lvar (@{${$expand_parameters}{length_var}}){
 		foreach my $dns (@{${$expand_parameters}{denoise}}){
@@ -310,8 +312,6 @@ foreach my $iter (keys %$iterations){;
 
 $pm->wait_all_children;
 print "\n";
-
-
 
 #
 # Process otus
@@ -399,14 +399,15 @@ sub filter_concat{
 	my ($total_readsin,$total_readsdiscarded,$total_readspassed);
 	my @filteredfiles;
 	if($eemax ne "NA"){
-		
-		printf timestamp(),": starting filtering %s files, pid $$\n", scalar @files if $verbose;
-		
-		open my $fillog, '>', $pathroot."filter_log_e$eemax.csv";
+		my $nfiles = scalar @files;
+		open my $fillog, '>', "${outpath}/filter_log_e$eemax.csv";
 		print $fillog "file,reads,discarded,passed\n";
-		
+		my $filesdone;
 		foreach my $file (@$files){
+			$filesdone++;
+			print timestamp(),": filtering $filesdone/$nfiles files, pid $$\n" if $verbose;
 			my ($name,$dir,$suffix) = fileparse($file);
+			$name =~ s/^(.+)\.[^.]+$/$1/;
 			my $filterfile = "$filterpath$name.fa";
 			push @filteredfiles, $filterfile;
 			my $filter_cmd = "usearch92 -fastq_filter $file -fastaout $filterfile -fastq_maxee $eemax 2>&1 1>/dev/null";
@@ -426,6 +427,7 @@ sub filter_concat{
 				die "Filtering failed for file $file\n";
 			}
 		}
+		close $fillog;
 	} else {
 		@filteredfiles = @$files;
 		($total_readsin,$total_readsdiscarded,$total_readspassed) = ("NA" x 3);
@@ -437,10 +439,10 @@ sub filter_concat{
 	print timestamp(),": reading and concatenating files, pid $$\n" if $verbose;
 	my %allfasta;
 	foreach my $file (@filteredfiles){
-		my %fasta = read_fasta($file,"check");
+		my %fasta = read_fasta($file,"check","order");
 	#	printf "$file has %d sequences\n", scalar keys %fasta if $debug;
 		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
-		my ($name,$dir)=fileparse($file);
+		my ($name,$dir,$suffix) =fileparse($file);
 		$name =~ s/^(.+)\.[^.]+$/$1/;
 		@allfasta{keys %fasta} = values %fasta;
 	}
@@ -453,12 +455,11 @@ sub filter_concat{
 	my $allreads_raw = "$outpath/cluster.allreads_raw_e$eemax.fa";
 	open my $allraw, '>', $allreads_raw;
 	foreach my $id (keys %allfasta){
-		print $allraw ">$id\n$allfasta{$id}\n";
+		print $allraw ">$id\n$allfasta{$id}{seq}\n";
 	}
 	close $allraw;
-	
-	store \%allfasta, "${pathroot}cluster.raw_e$eemax.hash";
-	print "Stored concatenated reads fasta in ${pathroot}cluster.raw_e$eemax.hash\n" if $debug;
+	store \%allfasta, "${pathroot}raw_e$eemax.hash";
+	print "Written concatenated reads fasta to $allreads_raw and stored in in ${pathroot}raw_e$eemax.hash\n" if $debug;
 	undef %allfasta;
 	
 	#
@@ -485,9 +486,12 @@ sub derep{
 	my $length_passed = 0;
 	my %dereplicated;
 	foreach my $id (keys %$raw){
-		if(length(${$raw}{$id})>=$minl and length(${$raw}{$id})<=$maxl){
-			$dereplicated{${$raw}{$id}}++;
+		if(length(${$raw}{$id}{seq})>=$minl and length(${$raw}{$id}{seq})<=$maxl){
 			$length_passed++;
+			if(!defined $dereplicated{${$raw}{$id}{seq}}{order} or $dereplicated{${$raw}{$id}{seq}}{order} > ${$raw}{$id}{order}){
+				$dereplicated{${$raw}{$id}{seq}}{order} = ${$raw}{$id}{order};
+			}
+			$dereplicated{${$raw}{$id}{seq}}{count}++;
 		} else {
 			$length_discarded++;
 		}
@@ -499,7 +503,7 @@ sub derep{
 	#
 	# Calculate statistics
 	#
-	my @groupsizes = values %dereplicated;
+	my @groupsizes = map { $dereplicated{$_}{count} } keys %dereplicated;
 	my %sizecount;
 	foreach my $size (@groupsizes){
 		$sizecount{$size}++;
@@ -533,13 +537,15 @@ sub sort_write_denoise{
 	#
 	# Output sequences size sorted
 	#
-	my @sorted_seqs = sort { ${$dereplicated}{$b} <=> ${$dereplicated}{$a} } keys %$dereplicated;
+	my @sorted_seqs = sort { ${$dereplicated}{$b}{count} <=> ${$dereplicated}{$a}{count} or 
+				 ${$dereplicated}{$a}{order} <=> ${$dereplicated}{$b}{order}
+				} keys %$dereplicated;
 	open my $sorted, '>', $sortpath;
 	my $bigenough = 0;
 	foreach my $seq (@sorted_seqs){
-		if(${$dereplicated}{$seq}>=$mins){
+		if(${$dereplicated}{$seq}{count}>=$mins){
 			$bigenough++;
-			print $sorted ">sequence$bigenough;size=${$dereplicated}{$seq};\n$seq\n";
+			print $sorted ">sequence$bigenough;size=${$dereplicated}{$seq}{count};order=${$dereplicated}{$seq}{order}\n$seq\n";
 		} else {
 			last;
 		}
@@ -564,12 +570,11 @@ sub sort_write_denoise{
 		my $denoise_cmd = "usearch92 -unoise2 $sortpath -fastaout $denoisepath 2>&1";
 		my $denoise_log = `$denoise_cmd`;
 		$denoise_log =~ s/\r/\n/g;
-		
-		print "Denoise log follows:\n$denoise_log\n" if $debug;
+		print "\nDenoise command:\n$denoise_cmd\nDenoise log:\n$denoise_log\n" if $debug;
 		
 		$denoise_log =~ /.*\s(\d+)\samplicons,\s(\d+)\sbad.*\s(\d+)\sgood,\s(\d+)\schimeras/s;
 		print "Parsed |$1,$2,$3,$4|\n" if $debug;
-		$nseq_discarded_unoise = $2;
+		$nseq_discarded_unoise = $n_groups_remain-$3;
 		$n_chimeras_unoise = $4;
 		$n_groups_remain = $3;
 		
@@ -595,10 +600,12 @@ sub cluster_and_map{
 	#
 	# Prepare paths
 	#
-		# Existing paths for source of this iteration
+	
+	# Existing paths for source of this iteration
 	my $sortpath = $pathroot."sort_eemax${$iterations}{$iter}{eemax}_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
 	my $denoisepath = $pathroot."denoised_eemax${$iterations}{$iter}{eemax}_dns${$iterations}{$iter}{denoise}_lvar${$iterations}{$iter}{length_var}_mins${$iterations}{$iter}{minsize}.fa";
-		# New paths
+	
+	# New paths
 	$pathroot .= "iteration$iter.";
 	my $chimerapath = $pathroot."chimeras.fa";
 	my $nonchimerapath = $pathroot."nonchimeras.fa";
@@ -622,7 +629,7 @@ sub cluster_and_map{
 		} else {
 			print timestamp(),":$printstring filtering chimeras\n" if $verbose;
 			
-			my $chimera_cmd = "usearchx -uchime2_denovo $chimerainput -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
+			my $chimera_cmd = "usearch92 -uchime2_denovo $chimerainput -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
 			print "Command: $chimera_cmd\n" if $debug;
 			my $chimera_log = `$chimera_cmd`;
 			$chimera_log =~ s/\r/\n/g ;
@@ -637,7 +644,7 @@ sub cluster_and_map{
 	
 	my ($nOTUs,$n_chimeras_cluster);
 	if (${$iterations}{$iter}{cpv} == 0){
-		print timestamp(),":$printstring clustering skipped because assignment value is 0\n" if $verbose;
+		print timestamp(),":$printstring clustering skipped because cpv is 0\n" if $verbose;
 		system("cp $clusterinput $otuspath");
 		my $seqs = `cat $clusterinput | grep -c '^>'`;
 		($nOTUs,$n_chimeras_cluster) = ($seqs-{${$iterations}{$iter}{filter_chimeras} eq "yes"  ? 0 : $n_chimeras_uchime},"NA");
@@ -645,14 +652,18 @@ sub cluster_and_map{
 		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{assigned_cpv} on file $clusterinput\n" if $verbose;
 		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
-			my $cluster_cmd = "usearch80 -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu 2>&1";
+			my $cluster_cmd = "usearch${$iterations}{$iter}{usearch_version} -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu 2>&1";
 			print "Command: $cluster_cmd\n" if $debug;
 			my $cluster_log = `$cluster_cmd`;
 	#		print $fh $cluster_log,"\n";
 			print "Log:\n$cluster_log\n" if $debug;
-			$cluster_log =~ /.*\s(\d+)\sOTUs,\s(\d+)\schimeras/s; #.* at beginning of regex ensures last OTU and chimera values selected (the function prints multiple lines of progress using \r!)
+			if($cluster_log =~ /.*\s(\d+)\sOTUs,\s(\d+)\schimeras/s){#.* at beginning of regex ensures last OTU and chimera values selected (the function prints multiple lines of progress using \r!)
+				($nOTUs,$n_chimeras_cluster) = ($1,$2);
+			} elsif( $cluster_log =~ /OTUs\s\s(\d+).+Chimeras\s\s(\d+)/s){
+				($nOTUs,$n_chimeras_cluster) = ($1,$2);
+			}
 	#		print "cluster chimeras: $2\n";
-			($nOTUs,$n_chimeras_cluster) = ($1,$2);
+			
 		} elsif(${$iterations}{$iter}{cluster_method} = "swarm"){
 		
 			my @bases = ('A','C','T','G');
@@ -686,7 +697,7 @@ sub cluster_and_map{
 	
 	my $idpc;
 	if(${$iterations}{$iter}{cpv} == 0){
-		$idpc=0.99
+		$idpc=0.999;
 	} else {
 		$idpc=1-(${$iterations}{$iter}{cpv}/100);
 	}
@@ -999,7 +1010,7 @@ sub parse_parameters {
 					$curmax += $5;
 				}
 				$param_expand{$param} = \@values;
-			} elsif($inparams->{$param} =~ /^[a-zA-Z]+(?:,[a-zA-Z]+)+$/){
+			} elsif($inparams->{$param} =~ /^[a-zA-Z\d]+(?:,[a-zA-Z\d]+)+$/){
 				my @values = split ',',$inparams->{$param};
 				$param_expand{$param} = \@values;
 			} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
@@ -1015,15 +1026,17 @@ sub parse_parameters {
 	}
 	my @allarray;
 	NestedLoops([@param_expand{@paramarray}], sub {push @allarray, [ @_ ]});
-	print Dumper \@allarray if $debug;
+	#print Dumper \@allarray if $debug;
 	my $nonint_removed;
 	my %iterhash;
 	my %hashcompare;
 	foreach my $it (0 .. $#allarray){
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
 		if($iterhash{$it+1}{cluster_method} eq "swarm"){
+			$iterhash{$it+1}{usearch_version} = "NA";
 			$iterhash{$it+1}{assigned_cpv} = sprintf( "%.0f", $iterhash{$it+1}{cpv}*$iterhash{$it+1}{seqconv});
 			$iterhash{$it+1}{cpv} = $iterhash{$it+1}{assigned_cpv}/$iterhash{$it+1}{seqconv};
+			
 			if(exists $hashcompare{$iterhash{$it+1}}){
 				delete $iterhash{$it+1};
 				$nonint_removed++;
@@ -1045,16 +1058,18 @@ sub parse_parameters {
 }
 
 sub read_fasta {
-	my ($fapathin,$checklabel) = @_;
+	my ($fapathin,$checklabel,$order) = @_;
 	my %fasta;
 	my $id;
-	my ($name,$dir)=fileparse($fapathin);
+	my ($name,$dir,$suffix) = fileparse($fapathin);
 	$name =~ s/^(.+)\.[^.]+$/$1/;
 	my $barcodelabelsadded = 0;
 	open my $fa_in, '<', $fapathin or die "Couldn't open $fapathin\n";
+	my $n;
 	while(my $row = <$fa_in>){
 		chomp $row;
 		if($row =~ /^>(.+)$/){
+			$n++;
 			$id = $1;
 			if($checklabel and !($id =~ /;barcodelabel=[^;]+;/)){
 				$barcodelabelsadded++;
@@ -1062,7 +1077,12 @@ sub read_fasta {
 			}
 			$id =~ s/\s/_/g;
 		} elsif($row =~ /^[ATCGNatcgn]+$/){
-			$fasta{$id} .= $row;
+			if($order){
+				$fasta{$id}{order} = $n;
+				$fasta{$id}{seq} .= $row;
+			} else {
+				$fasta{$id} .= $row;
+			}
 		} else { die "Couldn't read fasta format in $fapathin\n" };
 	}
 	close $fa_in;
