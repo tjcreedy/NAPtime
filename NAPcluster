@@ -229,14 +229,18 @@ my %allfasta;
 my %derep_log;
 my $derep_it;
 foreach my $eemax (@{${$expand_parameters}{eemax}}){
+	printf "Debug: entered derep loop for eemax $eemax out of %s, loading hash ${pathroot}raw_e$eemax.hash\n", join(',',@{${$expand_parameters}{eemax}}) if $debug;
 	my $raw = retrieve("${pathroot}raw_e$eemax.hash");
 	foreach my $lvar (@{${$expand_parameters}{length_var}}){
+		printf "\tDebug: entered derep loop for length var $lvar out of %s within eemax loop $eemax, starting derep subroutine on loaded hash with %d sequences\n", join(',',@{${$expand_parameters}{length_var}}), scalar keys %$raw if $debug;
 		$derep_it++;
 		($allfasta{$eemax}{$lvar},$derep_log{$eemax}{$lvar}) = derep($raw,$eemax,$lvar,$derep_it,$parameters{seqlength},\%stats);
+		printf "\tDebug: completed derep loop for length var $lvar out of %s within eemax loop $eemax, completed derep subroutine on loaded hash with %d sequences, retrieved %d dereplicated sequences\n", join(',',@{${$expand_parameters}{length_var}}), scalar keys %$raw, scalar keys %{$allfasta{$eemax}{$lvar}} if $debug;
 	}
 	undef $raw;
+	printf "Debug: completed derep loop for eemax $eemax, %s\n", $raw ? "hash unloading failed" :" hash correctly unloaded from memory" if $debug;
+	
 }
-
 
 $pathroot = $pathroot."cluster.";
 
@@ -250,10 +254,12 @@ my %sort_log;
 my $bpm = Parallel::ForkManager->new($threads);
 my $bpm_done=0;
 
+my $n_size_denoise_its = (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}} * scalar @{${$expand_parameters}{eemax}});
+
 $bpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$bpm_done++;
-	printf "Completed $bpm_done/%d dereplication and size sorting iterations\n",(scalar @{${$expand_parameters}{denoise}} *scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq 'eval';
+	print "Completed $bpm_done/$n_size_denoise_its size sorting and denoising iterations\n" if $verbose and $mode eq 'eval';
 	die "Error: size thread failed to output\n" unless $data_structure_reference;
 	my $eemax = $data_structure_reference->{eemax};
 	my $dns = $data_structure_reference->{dns};
@@ -263,7 +269,7 @@ $bpm->run_on_finish( sub {
 });
 
 print "\nStarting size sorting and denoising\n\n" if $verbose and $mode eq "batch";
-printf "\nStarting %d size sorting  and denoisingiterations using $threads threads\nc\n", (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}}) if $verbose and $mode eq "eval";
+print "\nStarting $n_size_denoise_its size sorting and denoising iterations using $threads threads\nc\n" if $verbose and $mode eq "eval";
 foreach my $eemax (@{${$expand_parameters}{eemax}}){
 	foreach my $lvar (@{${$expand_parameters}{length_var}}){
 		foreach my $dns (@{${$expand_parameters}{denoise}}){
@@ -478,7 +484,7 @@ sub derep{
 	
 	print timestamp(),": starting serial dereplication iteration $derep_it with length_var $lvar%: $minl-${maxl}bp inclusive\n", if $verbose;
 	my %dlog;
-	
+	printf "Debug: input hash has %d sequences\n",scalar keys %$raw if $debug;
 	#
 	# Dereplicate all sequences within length variation
 	#
@@ -495,11 +501,10 @@ sub derep{
 		} else {
 			$length_discarded++;
 		}
-		delete ${$raw}{$id};
 	}
+	my $ngroup = scalar keys %dereplicated;
 	
-	undef $raw;
-	
+	print timestamp(),": discarded $length_discarded sequences <${minl}bp or >${maxl}bp, $length_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose; 	
 	#
 	# Calculate statistics
 	#
@@ -508,7 +513,7 @@ sub derep{
 	foreach my $size (@groupsizes){
 		$sizecount{$size}++;
 	}
-	my $ngroup = scalar keys %dereplicated;
+	
 	my $singletons  = $sizecount{1} ? $sizecount{1} : 0;
 	my $minsize = min(@groupsizes);
 	my $topsize = max(@groupsizes);
@@ -516,7 +521,6 @@ sub derep{
 	
 	@dlog{@{${$stats}{derep}}} = ($lvar,$minl,$maxl,$length_discarded,$length_passed,$ngroup,$mean_groupsize,$minsize,$topsize);
 	
-	print timestamp(),": discarded $length_discarded sequences <${minl}bp or >${maxl}bp, $length_passed sequences dereplicated into $ngroup unique sequences\n" if $verbose;
 	return (\%dereplicated,\%dlog);
 }
 
@@ -1031,23 +1035,27 @@ sub parse_parameters {
 	my %iterhash;
 	my %hashcompare;
 	foreach my $it (0 .. $#allarray){
+		#printf "\nChecking iteration %d\n", $it+1 if $debug;
 		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
+		#print Dumper \$iterhash{$it+1} if $debug;
 		if($iterhash{$it+1}{cluster_method} eq "swarm"){
+			#print "Method is swarm\n" if $debug;
 			$iterhash{$it+1}{usearch_version} = "NA";
 			$iterhash{$it+1}{assigned_cpv} = sprintf( "%.0f", $iterhash{$it+1}{cpv}*$iterhash{$it+1}{seqconv});
 			$iterhash{$it+1}{cpv} = $iterhash{$it+1}{assigned_cpv}/$iterhash{$it+1}{seqconv};
-			
-			if(exists $hashcompare{$iterhash{$it+1}}){
+			my $compvalue = "$iterhash{$it+1}{cluster_method}-$iterhash{$it+1}{usearch_version}-$iterhash{$it+1}{assigned_cpv}";
+			if(exists $hashcompare{$compvalue}){
 				delete $iterhash{$it+1};
 				$nonint_removed++;
 			} else {
-				$hashcompare{$iterhash{$it+1}} = 1;
+				$hashcompare{$compvalue} = 1;
 			}
 		} else {
 			$iterhash{$it+1}{assigned_cpv} = $iterhash{$it+1}{cpv};
-			$hashcompare{$iterhash{$it+1}} = 1;
+			$hashcompare{$iterhash{$it+1}{cluster_method}} = 1;
 		}
 	}
+	
 	my $newid = 1;
 	my %newhash;
 	foreach my $oldid (keys %iterhash){
