@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.6.3"; #13/11/17
+my $version = "0.6.4"; #13/11/17
 
 my $help;
 my $outpath;
@@ -167,7 +167,7 @@ my @n_iter = sort keys %$iterations;
 #print "Debug: parsed iteration hash follows:" if $debug;
 #print Dumper \$iterations if $debug;
 
-printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded iterations removed due to redundant cpv assignments" : "" if($verbose and $#n_iter>0);
+printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded iterations removed due to redundancy" : "" if($verbose and $#n_iter>0);
 
 my %otusets;
 my %stats = (
@@ -199,12 +199,12 @@ my $fcpm = Parallel::ForkManager->new($threads);
 my $fcpm_done = 0;
 
 $fcpm->run_on_finish( sub {
-	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $fcpm_outdata) = @_;
 	$fcpm_done++;
 	printf "Completed $fcpm_done/%d%s concatenation iterations\n", scalar @{${$expand_parameters}{eemax}},$parameters{eemax} ne "NA" ? " quality filtering and" : "" if $verbose and $mode eq 'eval';
-	die "Error: filtering and concatenation thread failed to output\n" unless $data_structure_reference;
-	my $eemax = $data_structure_reference->{eemax};
-	$filcat_log{$eemax} = $data_structure_reference->{fclog};
+	die "Error: filtering and concatenation thread failed to output\n" unless $fcpm_outdata;
+	my $eemax = $fcpm_outdata->{eemax};
+	$filcat_log{$eemax} = $fcpm_outdata->{fclog};
 });
 
 printf "Starting %s concatenation\n", $parameters{eemax} ne "NA" ? "quality filtering and" : "" if $verbose and $mode eq "batch";
@@ -257,15 +257,15 @@ my $bpm_done=0;
 my $n_size_denoise_its = (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}} * scalar @{${$expand_parameters}{eemax}});
 
 $bpm->run_on_finish( sub {
-	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $bpm_outdata) = @_;
 	$bpm_done++;
 	print "Completed $bpm_done/$n_size_denoise_its size sorting and denoising iterations\n" if $verbose and $mode eq 'eval';
-	die "Error: size thread failed to output\n" unless $data_structure_reference;
-	my $eemax = $data_structure_reference->{eemax};
-	my $dns = $data_structure_reference->{dns};
-	my $lvar = $data_structure_reference->{lvar};
-	my $mins = $data_structure_reference->{mins};
-	$sort_log{$eemax}{$dns}{$lvar}{$mins} = $data_structure_reference->{slog};
+	die "Error: size thread failed to output\n" unless $bpm_outdata;
+	my $eemax = $bpm_outdata->{eemax};
+	my $dns = $bpm_outdata->{dns};
+	my $lvar = $bpm_outdata->{lvar};
+	my $mins = $bpm_outdata->{mins};
+	$sort_log{$eemax}{$dns}{$lvar}{$mins} = $bpm_outdata->{slog};
 });
 
 print "\nStarting size sorting and denoising\n\n" if $verbose and $mode eq "batch";
@@ -296,13 +296,13 @@ my $pm = Parallel::ForkManager->new($threads);
 my $done_iterations=0;
 
 $pm->run_on_finish( sub {
-	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $pm_outdata) = @_;
 	$done_iterations++;
 	printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1) if $verbose and $mode eq 'eval';
-	die "Error: iteration failed to output\n" unless $data_structure_reference;
-	my $iter = $data_structure_reference->{iter};
-	$cluster_log{$iter} = $data_structure_reference->{log};
-	$otusets{$iter} = $data_structure_reference->{otus};
+	die "Error: iteration failed to output\n" unless $pm_outdata;
+	my $iter = $pm_outdata->{iter};
+	$cluster_log{$iter} = $pm_outdata->{log};
+	$otusets{$iter} = $pm_outdata->{otus};
 });
 
 print "Starting clustering\n" if $verbose and $mode eq "batch";
@@ -358,12 +358,17 @@ open my $logcsv, '>',$logpath ;
 
 my @head = (@{$stats{general}},@params,@{$stats{filcat}},@{$stats{derep}},@{$stats{size}},@{$stats{cluster}});
 
-
+print "stats hash:\n" if $debug;
 print Dumper \%stats if $debug;
+print "params array:\n" if $debug;
 print Dumper \@params if $debug;
+print "cluster_log hash:\n" if $debug;
 print Dumper \%cluster_log if $debug;
+print "filcat_log hash:\n" if $debug;
 print Dumper \%filcat_log if $debug;
+print "derep_log hash:\n" if $debug;
 print Dumper \%derep_log if $debug;
+print "sort_log hash:\n" if $debug;
 print Dumper \%sort_log if $debug;
 
 print $logcsv join(',',@head);
@@ -436,7 +441,7 @@ sub filter_concat{
 		close $fillog;
 	} else {
 		@filteredfiles = @$files;
-		($total_readsin,$total_readsdiscarded,$total_readspassed) = ("NA" x 3);
+		($total_readsin,$total_readsdiscarded,$total_readspassed) = ("NA") x 3;
 	}
 	
 	#
@@ -633,7 +638,7 @@ sub cluster_and_map{
 		} else {
 			print timestamp(),":$printstring filtering chimeras\n" if $verbose;
 			
-			my $chimera_cmd = "usearch92 -uchime2_denovo $chimerainput -chimeras $chimerapath -nonchimeras $nonchimerapath 2>&1";
+			my $chimera_cmd = "usearch92 -uchime2_denovo $chimerainput -chimeras $chimerapath -nonchimeras $nonchimerapath -threads 1 2>&1";
 			print "Command: $chimera_cmd\n" if $debug;
 			my $chimera_log = `$chimera_cmd`;
 			$chimera_log =~ s/\r/\n/g ;
@@ -651,12 +656,12 @@ sub cluster_and_map{
 		print timestamp(),":$printstring clustering skipped because cpv is 0\n" if $verbose;
 		system("cp $clusterinput $otuspath");
 		my $seqs = `cat $clusterinput | grep -c '^>'`;
-		($nOTUs,$n_chimeras_cluster) = ($seqs-{${$iterations}{$iter}{filter_chimeras} eq "yes"  ? 0 : $n_chimeras_uchime},"NA");
+		($nOTUs,$n_chimeras_cluster) = ($seqs,"NA");
 	} else {
 		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{assigned_cpv} on file $clusterinput\n" if $verbose;
 		if(${$iterations}{$iter}{cluster_method} eq "usearch"){
 		
-			my $cluster_cmd = "usearch${$iterations}{$iter}{usearch_version} -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu 2>&1";
+			my $cluster_cmd = "usearch${$iterations}{$iter}{usearch_version} -cluster_otus $clusterinput -otus $otuspath -otu_radius_pct ${$iterations}{$iter}{cpv} -relabel otu -threads 1 2>&1";
 			print "Command: $cluster_cmd\n" if $debug;
 			my $cluster_log = `$cluster_cmd`;
 	#		print $fh $cluster_log,"\n";
@@ -703,12 +708,12 @@ sub cluster_and_map{
 	my $mapcmd;
 	if(${$iterations}{$iter}{cpv} == 0){
 #		$idpc=0.999;
-		$mapcmd = "usearch80 -search_exact $allreads_raw -db $otuspath -strand plus -uc $ucpath 2>&1"
+		$mapcmd = "usearch80 -search_exact $allreads_raw -db $otuspath -strand plus -uc $ucpath -threads 1 2>&1"
 	} else {
 		$idpc=1-(${$iterations}{$iter}{cpv}/100);
-		$mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath 2>&1";
+		$mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath -threads 1 2>&1";
 	}
-	print timestamp(),":$printstring starting mapping all reads to OTUs using",$idpc ? "id $idpc\n" : "exact matches only\n" if $verbose;
+	print timestamp(),":$printstring starting mapping all reads to OTUs using",$idpc ? " id $idpc\n" : " exact matches only\n" if $verbose;
 
 	print "Debug: map command $mapcmd\n" if $debug;
 	my $maplog=`$mapcmd`;
@@ -839,7 +844,7 @@ sub batch_taxonomyblast{
 				my @testarray = map {$linaoa[$_][$ti]} (0..$#linaoa);
 				{ no warnings 'uninitialized';print join(',',@testarray),"\n" if $debug;}
 				@matchi = most_frequent_indices(@testarray);
-				print join(',',@matchi),"\n";
+				print join(',',@matchi),"\n" if $debug;
 				printf "comparison found %d identical...",sum(@matchi) if $debug;
 				if(sum(@matchi)/$totalhits <= ${$parameters}{assignsens}){
 					$outi = $ti-1;
@@ -1017,7 +1022,7 @@ sub parse_parameters {
 					$curmax += $5;
 				}
 				$param_expand{$param} = \@values;
-			} elsif($inparams->{$param} =~ /^[a-zA-Z\d]+(?:,[a-zA-Z\d]+)+$/){
+			} elsif($inparams->{$param} =~ /^[a-zA-Z\d\.]+(?:,[a-zA-Z\d\.]+)+$/){
 				my @values = split ',',$inparams->{$param};
 				$param_expand{$param} = \@values;
 			} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
