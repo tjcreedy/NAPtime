@@ -164,8 +164,8 @@ $parameters{seqconv} = $parameters{seqlength}/100;
 my ($iterations,$expand_parameters,$n_discarded) = parse_parameters($mode,\%parameters);
 my @n_iter = sort keys %$iterations;
 
-#print "Debug: parsed iteration hash follows:" if $debug;
-#print Dumper \$iterations if $debug;
+print "Debug: parsed iteration hash follows:\n" if $debug;
+print Dumper \$iterations if $debug;
 
 printf "%d iterations successfully parsed%s\n\n",$#n_iter+1,$n_discarded ? ", after $n_discarded iterations removed due to redundancy" : "" if($verbose and $#n_iter>0);
 
@@ -177,18 +177,6 @@ my %stats = (
 	size	=> ['n_groups_discarded_<minsize','n_groups_discarded_unoise','n_chimeras_unoise','n_groups_remain'],
 	cluster	=> ['n_otus','n_chimeras_uchime','n_chimeras_cluster']
 );
-
-
-
-#
-# Prep for pipeline
-#
-
-my %samples;
-foreach my $file (@files){
-	my ($dir,$name,$suffix) = fileparse($file);
-	$samples{$name}=0;
-}
 
 #
 # Quality filtering and concatenation
@@ -311,7 +299,7 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (keys %$iterations){;
 	my $pid = $pm->start and next;
 	
-	my ($log,$otus) = cluster_and_map($pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs,\%samples);
+	my ($log,$otus) = cluster_and_map($pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs);
 	
 	$pm->finish(0, {log => $log, otus => $otus, iter => $iter});
 }
@@ -597,7 +585,7 @@ sub sort_write_denoise{
 
 
 sub cluster_and_map{
-	my ($pathroot,$iterations,$iter,$params,$stats,$maxmapseqs,$samples) = @_;
+	my ($pathroot,$iterations,$iter,$params,$stats,$maxmapseqs) = @_;
 	
 	my %log;
 	
@@ -656,6 +644,7 @@ sub cluster_and_map{
 		print timestamp(),":$printstring clustering skipped because cpv is 0\n" if $verbose;
 		system("cp $clusterinput $otuspath");
 		my $seqs = `cat $clusterinput | grep -c '^>'`;
+		chomp $seqs;
 		($nOTUs,$n_chimeras_cluster) = ($seqs,"NA");
 	} else {
 		print timestamp(),":$printstring starting clustering using ${$iterations}{$iter}{cluster_method} assignment value ${$iterations}{$iter}{assigned_cpv} on file $clusterinput\n" if $verbose;
@@ -746,7 +735,7 @@ sub cluster_and_map{
 		print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
 	}
 	
-	convert_uc_and_write($ucpath,$mappath,$samples);
+	convert_uc_and_write($ucpath,$mappath);
 	
 	print timestamp(),":$printstring completed mapping, map written to $mappath\n" if $verbose;
 	
@@ -1008,23 +997,36 @@ sub parse_parameters {
 	my %param_expand;
 	my @paramarray;
 	my $n_singleparams;
-	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-]*$/ } values %$inparams;
+	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-;]*$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
 		push @paramarray,$param;
 		if($inmode eq "batch"){
 			$param_expand{$param} = [$inparams->{$param}];
 		} elsif ($inmode eq "eval"){
-			if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
-				my @values;
-				my $curmax = $1;
-				while ($curmax <= $3){
-					push @values, $curmax;
-					$curmax += $5;
+			if ($inparams->{$param} =~ /[,-\/]/ ){
+			my @parts = split ',', $inparams->{$param}; 
+				if ($inparams->{$param} =~ /[-\/]/ ){
+					my @values;
+					foreach my $part (@parts){
+						if($part =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?)\/(\d+(\.\d+)?)$/){
+							my $curmax = $1;
+							while ($curmax <= $3){
+								push @values, $curmax;
+								$curmax += $5;
+							}
+						} elsif($part =~ /^(\d+(\.\d+)?)$/) {
+							push @values, $part;
+						} else {
+							die "Could not successfully parse string given for $param\n";
+						}
+					}
+					my @sortvalues = sort {$a <=> $b} @values;	
+					$param_expand{$param} = \@sortvalues;
+				} elsif($inparams->{$param} =~ /^[a-zA-Z,]+$|^[\d\.,]+$/){
+					$param_expand{$param} = \@parts;
+				} else {
+					die "Could not successfully parse string given for $param\n";
 				}
-				$param_expand{$param} = \@values;
-			} elsif($inparams->{$param} =~ /^[a-zA-Z\d\.]+(?:,[a-zA-Z\d\.]+)+$/){
-				my @values = split ',',$inparams->{$param};
-				$param_expand{$param} = \@values;
 			} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
 				$param_expand{$param} = [$inparams->{$param}];
 				$n_singleparams++;
@@ -1033,8 +1035,9 @@ sub parse_parameters {
 				die "Could not successfully parse string given for $param\n";
 			}
 		} else {
-			die "Argument passed to --mode not recognised, see \"$script --help\" for more information\n"
+			die "Argument passed to --mode not recognised, see \"$script --help\" for more information\n";
 		}
+	print "Complete value list for $param: ",join(",",@{$param_expand{$param}}),"\n" if $debug;
 	}
 	my @allarray;
 	NestedLoops([@param_expand{@paramarray}], sub {push @allarray, [ @_ ]});
@@ -1107,15 +1110,16 @@ sub read_fasta {
 }
 
 sub convert_uc_and_write {
-	my ($ucpath,$outpath,$samples) = @_;
+	my ($ucpath,$outpath) = @_;
 	my %tab;
 	my %otus;
+	my %samples;
 	open my $uc, '<', $ucpath or die "Error opening $ucpath\n";
 	while(my $row = <$uc>){
 		chomp $row;
 		if($row =~ /^H.*barcodelabel=([^;]+);\t(.*)$/){
 			$tab{$1}{$2}++;
-			${$samples}{$1}++;
+			$samples{$1}++;
 			$otus{$2}=1;
 		}
 	}
@@ -1123,9 +1127,9 @@ sub convert_uc_and_write {
 	
 	open my $csv, '>', $outpath or die "Error opening $outpath\n";
 	print $csv "sample,",join(",",sort keys %otus),"\n";
-	foreach my $sample (sort keys %$samples){
+	foreach my $sample (sort keys %samples){
 		print $csv $sample;
-		if(${$samples}{$sample}>0){
+		if($samples{$sample}>0){
 			foreach my $otu (sort keys %otus){
 				print $csv ",",$tab{$sample}{$otu} ? $tab{$sample}{$otu} : 0;
 			}
