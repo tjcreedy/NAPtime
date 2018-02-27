@@ -47,7 +47,8 @@ USAGE
 
 GetOptions("output=s"		=> \$outpath,
 	   "mode=s"		=> \$mode,
-	   "minlength=s"	=> \$parameters{minlength},
+	   "seqlength=i"	=> \$parameters{seqlength},
+	   "length_var=s"	=> \$parameters{length_var},
 	   "nest"		=> \$parameters{nest},
 	   "minsize=s"		=> \$parameters{minsize},
 	   "bootstraps=s"	=> \$parameters{bootstraps},
@@ -90,7 +91,7 @@ $paramdefaults{bootstraps} = 10 if $debug;
 print "Debug mode has reset the number of bootstraps to 10\n" if $debug;
 
 #print Dumper \%paramdefaults;
-my @params = ('minlength','nest','minsize','bootstraps','blasthits','blasttarget',
+my @params = ('seqlength','length_var','nest','minsize','bootstraps','blasthits','blasttarget',
 		'pvalue','blastthreshold','pvalue_maxthreshold','identity');
 
 $mode = "stat" unless(defined $mode);
@@ -100,7 +101,7 @@ if($mode eq "batch" and scalar @files < 2){
 	print "\nWARNING: Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n\n" ;
 	sleep(3);
 }
-die "Error: minlength must be specified\n" unless(defined $parameters{minlength});
+die "Error: sequence length must be specified\n" unless(defined $parameters{seqlength});
 
 #print Dumper \%parameters;
 
@@ -161,7 +162,7 @@ printf "%d iterations successfully parsed. Ready to start processing.\n",$#n_ite
 my %log;
 
 my %stats = (
-	general => ['filename','sequences','iteration','n_seq_discarded_<minlength','n_groups_discarded_<minsize','n_groups_remain'],
+	general => ['filename','sequences','iteration','length_discarded','n_groups_discarded_<minsize','n_groups_remain'],
 	group   => ['mean_groupsize','stdev_groupsize','min_groupsize','max_groupsize','max_groupsize_pc'],
 	filter  => ['filteroutcome','groupselected','bootstrap_pvalue','n_groups_pooled','selected_rank','pooled_size'],
 );
@@ -259,9 +260,14 @@ sub read_group_and_filter{
 	#
 	# Grouping function
 	#
-	print timestamp(),": $printstring grouping all sequences longer than ${$iterations}{$iter}{minlength}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
-	my ($groups,$minlength_discarded,$minsize_discarded) = group(\%fasta,${$iterations}{$iter},$printstring);
-	print timestamp(),": $printstring $minlength_discarded sequences discarded for being less than ${$iterations}{$iter}{minlength}bp long\n" if $verbose;
+	my $len = ${$iterations}{$iter}{seqlength};
+	my $lvar = ${$iterations}{$iter}{length_var};
+	my $minl = floor($len-($lvar*$len)/100);
+	my $maxl = ceil($len+($lvar*$len)/100);
+
+	print timestamp(),": $printstring grouping all sequences between ${minl}bp and ${maxl}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
+	my ($groups,$length_discarded,$minsize_discarded) = group(\%fasta,${$iterations}{$iter},$printstring,$minl,$maxl);
+	print timestamp(),": $printstring $length_discarded sequences discarded for being less than ${minl}bp or more than ${maxl}bp long\n" if $verbose;
 	print timestamp(),": $printstring $minsize_discarded groups discarded for having fewer than ${$iterations}{$iter}{minsize} sequences\n" if $verbose;
 	#
 	# Sort groups by size
@@ -285,7 +291,7 @@ sub read_group_and_filter{
 	# Do logging
 	#
 	@log{@{${$stats}{group}}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
-	@log{@{${$stats}{general}}} = ($name, scalar keys %fasta, $iter, $minlength_discarded, $minsize_discarded, $ngroup);
+	@log{@{${$stats}{general}}} = ($name, scalar keys %fasta, $iter, $length_discarded, $minsize_discarded, $ngroup);
 	@log{@{${$stats}{filter}}} = @{$filterresult}{@{${$stats}{filter}}};
 	@log{@$params} = @{${$iterations}{$iter}}{@$params};
 	
@@ -436,17 +442,17 @@ sub read_fasta {
 }
 
 sub group {
-	my ($fa,$specs,$printstring) = @_;
+	my ($fa,$specs,$printstring,$minl,$maxl) = @_;
 #Sort all sequences in the fasta by length, so the sequence that initialises a group will always be the longest
 	my @ids = sort { length($fa->{$b}) <=> length($fa->{$a}) } keys %$fa;
 	my %fa_grouped;
 	my @group_ids;
 	my $group_id;
-	my $minlength_discarded = 0;
+	my $length_discarded = 0;
 	foreach my $i (0 .. $#ids){
 		my $start = -1;
-		if(length($fa->{$ids[$i]}) <= ${$specs}{minlength}){
-			$minlength_discarded++;
+		if(length($fa->{$ids[$i]}) < $minl or length($fa->{$ids[$i]}) > $maxl){
+			$length_discarded++;
 		} else {
 			foreach my $j (0 .. $#group_ids){ 
 				if(${$specs}{nest}){
@@ -465,8 +471,8 @@ sub group {
 				push @group_ids, $group_id;
 			}
 		}
-		my $ngrouped = ($i+1)-$minlength_discarded;
-		printf "%s: $printstring grouped %d/%d sequences into %d groups, %d too short\n",timestamp(),$ngrouped,scalar @ids,$group_id+1,$minlength_discarded,if($verbose and (($ngrouped/1000)=~/^\d+$/ or $i==$#ids));
+		my $ngrouped = ($i+1)-$length_discarded;
+		printf "%s: $printstring grouped %d/%d sequences into %d groups, %d too short\n",timestamp(),$ngrouped,scalar @ids,$group_id+1,$length_discarded,if($verbose and (($ngrouped/1000)=~/^\d+$/ or $i==$#ids));
 	}
 	my $minsize_discarded = 0;
 #	print "Removing groups that are too small...";
@@ -476,7 +482,7 @@ sub group {
 		}
 	}
 #	print "$minsize_discarded removed\n";
-	return(\%fa_grouped,$minlength_discarded,$minsize_discarded);
+	return(\%fa_grouped,$length_discarded,$minsize_discarded);
 }
 
 sub new_group {
