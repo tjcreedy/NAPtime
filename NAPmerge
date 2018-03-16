@@ -20,6 +20,7 @@ my $outpath;
 my $for_length;
 my $rev_length;
 my %parameters;
+my $itsx;
 my $mode = "run";
 our $verbose;
 my $threads = 1;
@@ -74,7 +75,7 @@ GetOptions("outpath=s"		=> \$outpath,
 	   "eemax=s"		=> \$parameters{eemax},
 	   "mode=s"		=> \$mode,
 	   "noconvert"		=> \$parameters{noconvert},
-	   "itsx=s"		=> \$parameters{itsx},
+	   "itsx=s"		=> \$itsx,
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
 	   "debug"		=> \$debug,
@@ -102,10 +103,10 @@ print "\nWelcome. This is $script version $version, started at $timedate.\n";
 
 print "$usage\n" and exit if($help);
 
-print "\nChecking your inputs...\n";
-
 $verbose = 1 if $debug;
 print "\n#### Running in debug mode ####\n\n" if $debug;
+
+print "\nChecking your parameters...\n";
 
 if(scalar @ARGV == 0){
 	if($debug){
@@ -118,14 +119,9 @@ if(scalar @ARGV == 0){
 #
 #
 ########################################################
-my @files=@ARGV;
-
-print "Input parameters follow:\n" if $debug;
-print Dumper \%parameters if $debug;
 
 die "Error: please specify --pearquality, see \"$script --help\" for more information\n" if(!defined $parameters{pearquality});
 die "Error: please specify --eemax or --noconvert, see \"$script --help\" for more information\n" if(!defined $parameters{eemax}&!$parameters{noconvert});
-
 
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
@@ -133,30 +129,39 @@ if(!defined $outpath){
 	make_path($outpath);
 }
 
+print "\nChecking your files...\n";
+
+my @files=@ARGV;
+
 my %paired_files = find_pairs(@files);
 my $n_file_pairs = keys %paired_files;
 
-# Create temporary directory
-make_path("$outpath/trim");
+print "\nParsing iterations...\n";
 
-# Set up CSV report
-my %report;
+print "DEBUG: Input parameters:\n",Dumper \%parameters if $debug;
 
-# Set up iterations
 if($parameters{noconvert}){
-	die "Error: cannot run ITSX if not converting reads to fasta\n" if $parameters{itsx}
+	die "Error: cannot run ITSX if not converting reads to fasta\n" if $itsx;
 	$parameters{noconvert} = "true";
 	warn "Warning: values for eemax parameter are superfluous when not converting to fastq\n" if($parameters{eemax});
 	$parameters{eemax} = "NA";
 } else {
 	$parameters{noconvert} = "false";
 }
-	
+
+print "DEBUG: Filtered parameters for parsing:\n", Dumper \%parameters if $debug;
+
 my $iterations = parse_parameters($mode,\%parameters,sort keys %paired_files);
 
-print "Iterations follow:\n" if $debug;
-print Dumper $iterations if $debug;
+print "DEBUG: Parsed iterations:\n", Dumper $iterations if $debug;
 
+print "\nSetting up directories...\n";
+
+make_path("$outpath/trim");
+
+my %report; # Report hash
+
+print "\nPreparing for trimming...\n";
 # Run trimming
 	#Add 1 to primer lengths so that fastx_trimmer starts at correct base
 $for_length = $for_length+1;
@@ -202,7 +207,7 @@ printf "Starting %d merging and filtering iterations using $threads threads\n", 
 foreach my $iter (sort keys %$iterations){
 	my $pid = $mpm->start and next;
 	
-	my $out = merge_iteration($iterations,$iter,$outpath,$mode);
+	my $out = merge_iteration($iterations,$iter,$itsx,$outpath,$mode);
 	
 	$mpm->finish(0, {result => $out, iteration => $iter});
 }
@@ -231,7 +236,7 @@ exit;
 
 sub trim {
 	my ($pairs,$name,$for,$rev,$outpath) = @_;
-	
+	print "Trimming file pair $name\n" if $verbose;
 	my $ftcmd="fastx_trimmer -f $for_length -i ${$pairs}{$name}[0] -o $outpath/trim/$name\_R1.fq";
 	my $rtcmd="fastx_trimmer -f $rev_length -i ${$pairs}{$name}[1] -o $outpath/trim/$name\_R2.fq"; 
 	
@@ -240,14 +245,16 @@ sub trim {
 }
 
 sub merge_iteration {
-	my ($iterations,$iter,$outpath,$mode) = @_;
+	my ($iterations,$iter,$itsx,$outpath,$mode) = @_;
 	
 	make_path("$outpath/merge_$iter","$outpath/filter_$iter");
 	
 	my $log  = "${$iterations}{$iter}{name},$iter,${$iterations}{$iter}{pearquality}";
 	
+
 	my $pear_cmd = "pear -f $outpath/trim/${$iterations}{$iter}{name}\_R1.fq -r $outpath/trim/${$iterations}{$iter}{name}\_R2.fq -o $outpath/merge_$iter/${$iterations}{$iter}{name} -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
 	
+	print "Running PEAR on file ${$iterations}{$iter}{name} for iteration $iter with quality threshold ${$iterations}{$iter}{pearquality}\n" if $verbose;
 	my $asmbl_log=`$pear_cmd`;
 	$asmbl_log=~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s; #regex to extract data from pear_log
 	
@@ -264,6 +271,7 @@ sub merge_iteration {
 		$log .= ",${$iterations}{$iter}{eemax}";
 		my $filter_cmd = "usearch70 -fastq_filter $outpath/merge_$iter/${$iterations}{$iter}{name}.assembled.fastq -fastaout $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
 		
+		print "Running fastq_filter on file ${$iterations}{$iter}{name} for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
 		my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
 		
 		$filter_log=~ /.*\s(\d*)\s\sFASTQ.*\s(\d*)\s\sLow.*\s(\d*)\s\sConverted.*/s; #regex to extract data
@@ -275,24 +283,24 @@ sub merge_iteration {
 		
 		$log .= "\n";
 		
-		my $last = "filter_$iter";
+		my $last = "filter_$iter/${$iterations}{$iter}{name}.fa";
 		
-		if(${$iterations}{$iter}{itsx} eq "true"){
-			print "Running ITSx \n" if($verbose);
+		if($itsx){
+			print "Running ITSx on file ${$iterations}{$iter}{name} for iteration $iter\n" if $verbose;
 			make_path("$outpath/itsx_$iter");
-			my $itsx_cmd = "ITSx -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $outpath/itsx/${$iterations}{$iter}{name}.fa -t F -p ${$iterations}{$iter}{itsx} --preserve T --cpu 1";
+			my $itsx_cmd = "ITSx -p $itsx -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $outpath/itsx_$iter/${$iterations}{$iter}{name} -t F --preserve T --cpu 1 --preserve T --cpu 1 --graphical F --positions F --not_found F";
 			print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;			
 			system("$itsx_cmd");
-			$last = "itsx_$iter";
+			$last = "itsx_$iter/${$iterations}{$iter}{name}.full.fasta";
 		}
 		
-		my $suffix = $mode eq "run" ? "" : "_iteration$iter";
+		my $suffix = $mode eq "eval" ? "_iteration$iter" : "";
 		
-		my $readlabelcmd="sed \"-es/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=${$iterations}{$iter}{name};/\" < $outpath/$last/${$iterations}{$iter}{name}.fa > $outpath/${$iterations}{$iter}{name}$suffix.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
+		my $readlabelcmd="sed \"-es/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=${$iterations}{$iter}{name};/\" < $outpath/$last > $outpath/${$iterations}{$iter}{name}$suffix.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
 		system($readlabelcmd);
 	}
-	remove_tree("$outpath/merge_$iter","$outpath/filter_$iter");
-	remove_tree("$outpath/itsx_$iter") if (defined ${$iterations}{$iter}{itsx});
+	remove_tree("$outpath/merge_$iter","$outpath/filter_$iter") unless $debug;
+	remove_tree("$outpath/itsx_$iter") if $itsx and !$debug;
 	return $log;
 }
 
@@ -303,8 +311,7 @@ sub parse_parameters {
 	my $n_singleparams;
 	push @paramarray, "name";
 	push @itarray, \@names;
-	print "Filtered parameters for parsing:\n", Dumper $inparams if $debug;
-	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-]*$/ }  values %$inparams;
+	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-]*$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
 		push @paramarray, $param;
 		if($inmode eq "run"){
