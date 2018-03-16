@@ -143,16 +143,10 @@ make_path("$outpath/trim");
 my %report;
 
 # Set up iterations
-if($parameters{itsx}){
-	die "Error: cannot run ITSX if not converting reads to fasta\n" if $parameters{noconvert};
-	$parameters{itsx} = $parameters{itsx} eq "both" ? "true,false" : "true";
-} else {
-	$parameters{itsx} = "false";
-}
-
 if($parameters{noconvert}){
+	die "Error: cannot run ITSX if not converting reads to fasta\n" if $parameters{itsx}
 	$parameters{noconvert} = "true";
-	print "Values for eemax parameter are superfluous when not converting to fastq\n" if($parameters{eemax});
+	warn "Warning: values for eemax parameter are superfluous when not converting to fastq\n" if($parameters{eemax});
 	$parameters{eemax} = "NA";
 } else {
 	$parameters{noconvert} = "false";
