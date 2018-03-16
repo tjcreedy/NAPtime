@@ -215,7 +215,7 @@ foreach my $iter (sort keys %$iterations){
 
 $mpm->wait_all_children;
 print "\n";
-remove_tree("$outpath/trim");
+remove_tree("$outpath/trim") unless $debug;
 
 #Do logging
 open my $log, '>', "$outpath/merge.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
@@ -286,7 +286,8 @@ sub merge_iteration {
 		if(${$iterations}{$iter}{itsx} eq "true"){
 			print "Running ITSx \n" if($verbose);
 			make_path("$outpath/itsx_$iter");
-			my $itsx_cmd = "ITSx -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $outpath/itsx/${$iterations}{$iter}{name}.fa -t F -p ${$iterations}{$iter}{itsx} --preserve T --cpu 3";
+			my $itsx_cmd = "ITSx -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $outpath/itsx/${$iterations}{$iter}{name}.fa -t F -p ${$iterations}{$iter}{itsx} --preserve T --cpu 1";
+			print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;			
 			system("$itsx_cmd");
 			$last = "itsx_$iter";
 		}
