@@ -9,7 +9,7 @@ use Getopt::Long;
 use File::Basename;
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(move);
-use List::Util qw(all max); 
+use List::Util qw(all any max); 
 use Algorithm::Loops qw(NestedLoops);
 use Parallel::ForkManager;
 use Time::HiRes qw(usleep);
@@ -134,9 +134,15 @@ die "Error: please specify --eemax or --noconvert, see \"$script --help\" for mo
 
 die "Error: please specify -taxon_itsx if using ITSx, see \"$script --help\" for more information\n" if($itsx{path} and !$itsx{taxon});
 
-if(%itsx){
+print "DEBUG: itsx hash:\n",Dumper\%itsx if $debug;
+
+if(defhash(\%itsx)){
 	die "Error: you must specify a path to HMMs using -itsx if you wish to use ITSx, see \"$script --help\" for more information\n" unless $itsx{path};
-	die "Error: please specify -taxon_itsx if using ITSx, see \"$script --help\" for more information\n" unless $itsx{taxon};
+	if($itsx{taxon}){
+		print "ITSx taxon $itsx{taxon} requested: note that $script does not check that this is an acceptable value for ITSx\n";
+	} else {
+		$itsx{taxon} = '.';
+	}
 	if($itsx{region}){
 		my %permitted_regions = map { $_ => 1 } ("SSU","ITS1","5.8S","ITS2","LSU");
 		die "Error: please specify a single accepted region for -region_itsx, see \"$script --help\" for more information\n" unless $permitted_regions{$itsx{region}};
@@ -145,13 +151,16 @@ if(%itsx){
 	}
 }
 
-if($primers{length}){
-	die "Error: please specify either primer lengths or primer sequences for trimming, not both, see \"$script --help\" for more information\n" if $primers{sequence};
+print "DEBUG: primers hash:\n", Dumper \%primers if $debug;
+
+if(defhash(\%{$primers{length}})){
+	die "Error: please specify either primer lengths or primer sequences for trimming, not both, see \"$script --help\" for more information\n" if defhash(\%{$primers{sequence}});
 	die "Error: you must specify the lengths of both forward and revers primers for length trimming, see \"$script --help\" for more information\n" unless ($primers{length}{forward} and $primers{length}{reverse});
-} elsif($primers{sequence}){
+} elsif(defhash(\%{$primers{sequence}})){
 	if($primers{sequence}{file}){
 		die "Error: please specify either both primer sequences or the path to a file containing primer sequences, see \"$script --help\" for more information\n" if( $primers{sequence}{forward} or $primers{sequence}{reverse} );
-		@{$primers{sequence}}{'forward','reverse'} = ( chomp line($primers{sequence}{file},1) , chomp line($primers{sequence}{file},2) ) or die "Error: cannot read or parse primer file\n";
+		$primers{sequence}{forward} = line($primers{sequence}{file},1) or die "Error: cannot read or parse primer file\n";
+		$primers{sequence}{reverse} = line($primers{sequence}{file},2) or die "Error: cannot read or parse primer file\n";
 	} else {
 		die "Error: please specify both forward and reverse primer sequences, see \"$script --help\" for more information\n" unless( $primers{sequence}{forward} and $primers{sequence}{reverse} );
 	}
@@ -159,6 +168,8 @@ if($primers{length}){
 } else {
 	die "Error: please specify some primer details, either lengths or sequences, see \"$script --help\" for more information\n";
 }
+
+#print "DEBUG: primers hash:\n", Dumper \%primers if $debug;
 
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
@@ -227,6 +238,7 @@ foreach my $name (sort keys %paired_files){
 $tpm->wait_all_children;
 print "\n";
 
+
 # Run merging
 my $mpm = Parallel::ForkManager->new($threads);
 
@@ -245,7 +257,7 @@ printf "Starting %d merging and filtering iterations using $threads threads\n", 
 foreach my $iter (sort keys %$iterations){
 	my $pid = $mpm->start and next;
 	
-	my $out = merge_iteration($iterations,$iter,\%itsx,\%trim_log,$outpath,$mode);
+	my $out = merge_iteration($iterations,$iter,\%trim_log,\%itsx,$outpath,$mode);
 	
 	$mpm->finish(0, {result => $out, iteration => $iter});
 }
@@ -276,24 +288,31 @@ sub trim {
 	my ($pairs,$name,$primers,$outpath) = @_;
 	my $cutspec;
 	my $log;
-	if(${$primers}{lengths}){
+	
+	if(defhash(${$primers}{length})){
 		print "Trimming file pair $name based on primer lengths\n" if $verbose;
-		$cutspec = "-u ${$primers}{lengths}{forward} -U ${$primers}{lengths}{reverse}";
+		$cutspec = "-u ${$primers}{length}{forward} -U ${$primers}{length}{reverse}";
 	} else {
-		print "Trimming file pair $name based on primer sequences" if $verbose;
+		print "Trimming file pair $name based on primer sequences\n" if $verbose;
 		$cutspec = "-g ${$primers}{sequence}{forward} -G ${$primers}{sequence}{reverse}";
 		$cutspec .= " --discard-untrimmed" if ${$primers}{sequence}{strict};
 	}
 	
-	my $cutadapt_cmd = "cutadapt $cutspec -o $outpath/trim/$name\_R1.fq $outpath/trim/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
+	my $cutadapt_cmd = "cutadapt $cutspec -o $outpath/trim/$name\_R1.fq -p $outpath/trim/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
+	
+	print "DEBUG: cutadapt command:\n$cutadapt_cmd\n" if $debug;
+	
 	my $cutadapt_log = `$cutadapt_cmd`;
 	
+	
+	print "DEBUG: cutadapt log:\n$cutadapt_log\n" if $debug;
+	
 	$cutadapt_log =~ /Total read pairs processed:[^\d]+(\d{1,3}(?:,\d{3})*)[^\d].*\(passing filters\):[^\d]+(\d{1,3}(?:,\d{3})*)[^\d]/s;
-	$log = $1 =~ tr/,//;
-	my $discarded = $log - $2 =~ tr/,//;
-	$log .= ",$discarded";
+	my @cutadapt_parse = ($1,$2);
+	map { s/,//g; } @cutadapt_parse;
+	$cutadapt_parse[1] = $cutadapt_parse[0] - $cutadapt_parse[1];
+	$log = join ",",@cutadapt_parse;
 	return $log;
-
 }
 
 sub merge_iteration {
@@ -301,7 +320,7 @@ sub merge_iteration {
 	
 	make_path("$outpath/merge_$iter","$outpath/filter_$iter");
 	
-	my $log = "${$iterations}{$iter}{name},$iter,${$trim_log}{name},${$iterations}{$iter}{pearquality}";
+	my $log = "${$iterations}{$iter}{name},$iter,${$trim_log}{${$iterations}{$iter}{name}},${$iterations}{$iter}{pearquality}";
 	
 	my $pear_cmd = "pear -f $outpath/trim/${$iterations}{$iter}{name}\_R1.fq -r $outpath/trim/${$iterations}{$iter}{name}\_R2.fq -o $outpath/merge_$iter/${$iterations}{$iter}{name} -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
 	
@@ -341,20 +360,22 @@ sub merge_iteration {
 			
 			make_path("$outpath/itsx_$iter");
 			
-			my $itsx_outfile = $outpath/itsx_$iter/${$iterations}{$iter}{name};
+			my $itsx_outfile = "$outpath/itsx_$iter/${$iterations}{$iter}{name}";
 			
-			my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $itsx_outfile -t ${$iter}{taxon} --save_regions ${$iter}{region} --preserve T --cpu 1 --graphical F --positions F --not_found F";
+			my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $itsx_outfile -t ${$itsx}{taxon} --save_regions ${$itsx}{region} --preserve T --cpu 1 --graphical F --positions F --not_found F";
 			print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;
-			
 			system("$itsx_cmd");
-			$last = "itsx_$iter/${$iterations}{$iter}{name}.${$iter}{region}.fasta";
 			
-			my $summaryline = line("$itsx_outfile.summary.fasta",2);
-			$summaryline =~ /(\d+)$/;
-			$log .= ",$1";
+			$last = "itsx_$iter/${$iterations}{$iter}{name}.${$itsx}{region}.fasta";
+			
+			my $summaryline = line("$itsx_outfile.summary.txt",2);
+			$summaryline =~ /[^\d]+(\d{1,3}(?:,\d{3})*)$/;
+			my $summary = $1;
+			$summary =~ s/,//g;
+			$log .= ",$summary";
 			
 		} else {
-			$log .= "NA";
+			$log .= ",NA";
 		}
 		
 		$log .= "\n";
@@ -420,6 +441,7 @@ sub line {
 	my ($path,$line) = @_;
 	open my $fh, '<', $path;
 	while (<$fh>) {
+		chomp $_;
 		return $_ if $. == $line;
 	}
 }
@@ -436,6 +458,11 @@ sub find_pairs {
 	    }
 	}
 	return %filepairs;
+}
+
+sub defhash{
+	my ($hash) = @_;
+	return any { defined ${$hash}{$_} } keys %{$hash};
 }
 
 sub timestamp{
