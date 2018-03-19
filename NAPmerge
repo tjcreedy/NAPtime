@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #By Thomas J Creedy, thomas@tjcreedy.co.uk
 
-#test development change
+
 
 use warnings;
 use strict;
@@ -19,10 +19,9 @@ use Data::Dumper;
 my $version = "0.3.1"; #12/03/2018
 my $help;
 my $outpath;
-my $for_length;
-my $rev_length;
 my %parameters;
-my $itsx;
+my %itsx;
+my %primers;
 my $mode = "run";
 our $verbose;
 my $threads = 1;
@@ -62,6 +61,8 @@ Arguments:
 	         eemax:  A value or range to pass to USEARCH70 fastq_filter as a -fastq_maxee option
 	          mode:  One of "run" or "eval", see above. Default "run".
 	          itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
+	    taxon_itsx:  If ITSx is used, the taxon or taxa (according to the ITSx requirements) to filter for. Required if using ITSx.
+	     region_itsx:  If ITSx is used, the region (according to the ITSx requirements) to filter for. Currently, only one region is accepted. Default "ITS2".
 	       threads:  Number of CPU threads to use. Default 1.
 	       verbose:  Reports on progress.
 	          help:  Prints out this helpful message.
@@ -71,13 +72,19 @@ USAGE
 ######################################################
 
 GetOptions("outpath=s"		=> \$outpath,
-	   "forwardprimerl=s"	=> \$for_length,
-	   "reverseprimerl=s"	=> \$rev_length,
+	   "forwardprimerl=s"	=> \$primers{length}{forward},
+	   "reverseprimerl=s"	=> \$primers{length}{reverse},
+	   "Fprimersequence=s"	=> \$primers{sequence}{forward},
+	   "Rprimersequence=s"	=> \$primers{sequence}{reverse},
+	   "Primersfile=s"	=> \$primers{sequence}{file},
+	   "Stricttrim"		=> \$primers{sequence}{strict},
 	   "pearquality=s"	=> \$parameters{pearquality},
 	   "eemax=s"		=> \$parameters{eemax},
 	   "mode=s"		=> \$mode,
 	   "noconvert"		=> \$parameters{noconvert},
-	   "itsx=s"		=> \$itsx,
+	   "itsx=s"		=> \$itsx{path},
+	   "taxon_itsx=s"	=> \$itsx{taxon},
+	   "region_itsx=s"	=> \$itsx{region},
 	   "threads=i"		=> \$threads,
 	   "verbose"		=> \$verbose,
 	   "debug"		=> \$debug,
@@ -125,6 +132,34 @@ if(scalar @ARGV == 0){
 die "Error: please specify --pearquality, see \"$script --help\" for more information\n" if(!defined $parameters{pearquality});
 die "Error: please specify --eemax or --noconvert, see \"$script --help\" for more information\n" if(!defined $parameters{eemax}&!$parameters{noconvert});
 
+die "Error: please specify -taxon_itsx if using ITSx, see \"$script --help\" for more information\n" if($itsx{path} and !$itsx{taxon});
+
+if(%itsx){
+	die "Error: you must specify a path to HMMs using -itsx if you wish to use ITSx, see \"$script --help\" for more information\n" unless $itsx{path};
+	die "Error: please specify -taxon_itsx if using ITSx, see \"$script --help\" for more information\n" unless $itsx{taxon};
+	if($itsx{region}){
+		my %permitted_regions = map { $_ => 1 } ("SSU","ITS1","5.8S","ITS2","LSU");
+		die "Error: please specify a single accepted region for -region_itsx, see \"$script --help\" for more information\n" unless $permitted_regions{$itsx{region}};
+	} else {
+		$itsx{region} = "ITS2";
+	}
+}
+
+if($primers{length}){
+	die "Error: please specify either primer lengths or primer sequences for trimming, not both, see \"$script --help\" for more information\n" if $primers{sequence};
+	die "Error: you must specify the lengths of both forward and revers primers for length trimming, see \"$script --help\" for more information\n" unless ($primers{length}{forward} and $primers{length}{reverse});
+} elsif($primers{sequence}){
+	if($primers{sequence}{file}){
+		die "Error: please specify either both primer sequences or the path to a file containing primer sequences, see \"$script --help\" for more information\n" if( $primers{sequence}{forward} or $primers{sequence}{reverse} );
+		@{$primers{sequence}}{'forward','reverse'} = ( chomp line($primers{sequence}{file},1) , chomp line($primers{sequence}{file},2) ) or die "Error: cannot read or parse primer file\n";
+	} else {
+		die "Error: please specify both forward and reverse primer sequences, see \"$script --help\" for more information\n" unless( $primers{sequence}{forward} and $primers{sequence}{reverse} );
+	}
+	print "Warning: reads with poor adapter matches will not be trimmed, but will be retained in the dataset, if -Stricttrim is not set, see \"$script --help\" for more information\n" unless $primers{sequence}{strict}
+} else {
+	die "Error: please specify some primer details, either lengths or sequences, see \"$script --help\" for more information\n";
+}
+
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
 } else {
@@ -143,7 +178,7 @@ print "\nParsing iterations...\n";
 print "DEBUG: Input parameters:\n",Dumper \%parameters if $debug;
 
 if($parameters{noconvert}){
-	die "Error: cannot run ITSX if not converting reads to fasta\n" if $itsx;
+	die "Error: cannot run ITSX if not converting reads to fasta\n" if $itsx{path};
 	$parameters{noconvert} = "true";
 	warn "Warning: values for eemax parameter are superfluous when not converting to fastq\n" if($parameters{eemax});
 	$parameters{eemax} = "NA";
@@ -165,17 +200,18 @@ my %report; # Report hash
 
 print "\nPreparing for trimming...\n";
 # Run trimming
-	#Add 1 to primer lengths so that fastx_trimmer starts at correct base
-$for_length = $for_length+1;
-$rev_length = $rev_length+1;
 
 my $tpm = Parallel::ForkManager->new($threads);
 
 my $done_trims=0;
+my %trim_log;
 
 $tpm->run_on_finish( sub {
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$done_trims++;
 	printf "Completed trimming $done_trims/%d file pairs\r", scalar keys %paired_files if $verbose;
+	my $fork_name = $data_structure_reference->{name};
+	$trim_log{$fork_name} = $data_structure_reference->{result};
 });
 
 printf "Starting to trim %d file pairs using $threads threads\n", scalar keys %paired_files if $verbose;
@@ -183,9 +219,9 @@ printf "Starting to trim %d file pairs using $threads threads\n", scalar keys %p
 foreach my $name (sort keys %paired_files){
 	my $pid = $tpm->start and next;
 	
-	trim(\%paired_files,$name,$for_length,$rev_length,$outpath);
+	my $out = trim(\%paired_files,$name,\%primers,$outpath);
 	
-	$tpm->finish(0);
+	$tpm->finish(0, {result => $out, name => $name});
 }
 
 $tpm->wait_all_children;
@@ -209,7 +245,7 @@ printf "Starting %d merging and filtering iterations using $threads threads\n", 
 foreach my $iter (sort keys %$iterations){
 	my $pid = $mpm->start and next;
 	
-	my $out = merge_iteration($iterations,$iter,$itsx,$outpath,$mode);
+	my $out = merge_iteration($iterations,$iter,\%itsx,\%trim_log,$outpath,$mode);
 	
 	$mpm->finish(0, {result => $out, iteration => $iter});
 }
@@ -221,7 +257,7 @@ remove_tree("$outpath/trim") unless $debug;
 #Do logging
 open my $log, '>', "$outpath/merge.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
 
-print $log join(',',('readname' , 'iteration' , 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted')),"\n";
+print $log join(',',('readname' , 'iteration' ,'Input_reads','Pairs_untrimmed_removed', 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted','ITSx detected')),"\n";
 
 foreach my $i (sort keys %report){
 	print $log $report{$i};
@@ -237,23 +273,36 @@ exit;
 #Create a hash of iterations, each of which is a hash of parameters and their values for that iteration
 
 sub trim {
-	my ($pairs,$name,$for,$rev,$outpath) = @_;
-	print "Trimming file pair $name\n" if $verbose;
-	my $ftcmd="fastx_trimmer -f $for_length -i ${$pairs}{$name}[0] -o $outpath/trim/$name\_R1.fq";
-	my $rtcmd="fastx_trimmer -f $rev_length -i ${$pairs}{$name}[1] -o $outpath/trim/$name\_R2.fq"; 
+	my ($pairs,$name,$primers,$outpath) = @_;
+	my $cutspec;
+	my $log;
+	if(${$primers}{lengths}){
+		print "Trimming file pair $name based on primer lengths\n" if $verbose;
+		$cutspec = "-u ${$primers}{lengths}{forward} -U ${$primers}{lengths}{reverse}";
+	} else {
+		print "Trimming file pair $name based on primer sequences" if $verbose;
+		$cutspec = "-g ${$primers}{sequence}{forward} -G ${$primers}{sequence}{reverse}";
+		$cutspec .= " --discard-untrimmed" if ${$primers}{sequence}{strict};
+	}
 	
-	system($ftcmd);
-	system($rtcmd);
+	my $cutadapt_cmd = "cutadapt $cutspec -o $outpath/trim/$name\_R1.fq $outpath/trim/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
+	my $cutadapt_log = `$cutadapt_cmd`;
+	
+	$cutadapt_log =~ /Total read pairs processed:[^\d]+(\d{1,3}(?:,\d{3})*)[^\d].*\(passing filters\):[^\d]+(\d{1,3}(?:,\d{3})*)[^\d]/s;
+	$log = $1 =~ tr/,//;
+	my $discarded = $log - $2 =~ tr/,//;
+	$log .= ",$discarded";
+	return $log;
+
 }
 
 sub merge_iteration {
-	my ($iterations,$iter,$itsx,$outpath,$mode) = @_;
+	my ($iterations,$iter,$trim_log,$itsx,$outpath,$mode) = @_;
 	
 	make_path("$outpath/merge_$iter","$outpath/filter_$iter");
 	
-	my $log  = "${$iterations}{$iter}{name},$iter,${$iterations}{$iter}{pearquality}";
+	my $log = "${$iterations}{$iter}{name},$iter,${$trim_log}{name},${$iterations}{$iter}{pearquality}";
 	
-
 	my $pear_cmd = "pear -f $outpath/trim/${$iterations}{$iter}{name}\_R1.fq -r $outpath/trim/${$iterations}{$iter}{name}\_R2.fq -o $outpath/merge_$iter/${$iterations}{$iter}{name} -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
 	
 	print "Running PEAR on file ${$iterations}{$iter}{name} for iteration $iter with quality threshold ${$iterations}{$iter}{pearquality}\n" if $verbose;
@@ -283,18 +332,32 @@ sub merge_iteration {
 			$log .= ",$e";
 		}
 		
-		$log .= "\n";
+		
 		
 		my $last = "filter_$iter/${$iterations}{$iter}{name}.fa";
 		
-		if($itsx){
+		if(${$itsx}{path}){
 			print "Running ITSx on file ${$iterations}{$iter}{name} for iteration $iter\n" if $verbose;
+			
 			make_path("$outpath/itsx_$iter");
-			my $itsx_cmd = "ITSx -p $itsx -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $outpath/itsx_$iter/${$iterations}{$iter}{name} -t F --preserve T --cpu 1 --preserve T --cpu 1 --graphical F --positions F --not_found F";
-			print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;			
+			
+			my $itsx_outfile = $outpath/itsx_$iter/${$iterations}{$iter}{name};
+			
+			my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $itsx_outfile -t ${$iter}{taxon} --save_regions ${$iter}{region} --preserve T --cpu 1 --graphical F --positions F --not_found F";
+			print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;
+			
 			system("$itsx_cmd");
-			$last = "itsx_$iter/${$iterations}{$iter}{name}.full.fasta";
+			$last = "itsx_$iter/${$iterations}{$iter}{name}.${$iter}{region}.fasta";
+			
+			my $summaryline = line("$itsx_outfile.summary.fasta",2);
+			$summaryline =~ /(\d+)$/;
+			$log .= ",$1";
+			
+		} else {
+			$log .= "NA";
 		}
+		
+		$log .= "\n";
 		
 		my $suffix = $mode eq "eval" ? "_iteration$iter" : "";
 		
@@ -353,6 +416,13 @@ sub parse_parameters {
 	return \%iterhash;
 }
 
+sub line {
+	my ($path,$line) = @_;
+	open my $fh, '<', $path;
+	while (<$fh>) {
+		return $_ if $. == $line;
+	}
+}
 
 sub find_pairs {
 	my @allfiles = @_;
