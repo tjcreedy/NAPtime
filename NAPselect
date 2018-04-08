@@ -485,7 +485,7 @@ sub group {
 	my $length_discarded = 0;
 	foreach my $i (0 .. $#ids){
 		my $start = -1;
-		printf "length %d\n",length($fa->{$ids[$i]});		
+		printf "length %d\n",length($fa->{$ids[$i]}) if $debug;
 		if(length($fa->{$ids[$i]}) < $minl or length($fa->{$ids[$i]}) > $maxl){
 			$length_discarded++;
 		} else {
@@ -507,7 +507,7 @@ sub group {
 			}
 		}
 		my $ngrouped = ($i+1)-$length_discarded;
-		printf "%s: $printstring grouped %d/%d sequences into %d groups, %d discarded due to length\n",timestamp(),$ngrouped,scalar @ids,$group_id+1,$length_discarded,if($verbose and (($ngrouped/1000)=~/^\d+$/ or $i==$#ids));
+		printf "%s: $printstring grouped %d/%d sequences into %d groups, %d discarded due to length\n",timestamp(),$ngrouped,scalar @ids,$group_id+1,$length_discarded,if($verbose and $ngrouped>0 and (($ngrouped/1000)=~/^\d+$/ or $i==$#ids));
 	}
 	my $minsize_discarded = 0;
 #	print "Removing groups that are too small...";
