@@ -239,11 +239,12 @@ if($mode eq "stat"){
 	die "Mode not recognised\n";
 }
 
+my $highsuccesses = 0;
+my $lowsuccesses = 0;
+
 if($mode eq 'batch'){
-	my $highsucccesses;
-	my $lowsuccesses;
-	map { $highsuccesses++ if $log{$_}{filteroutcome} eq "high" } keys %log;
-	map { $lowsuccesses++ if $log{$_}{filteroutcome} eq "low" } keys %log;
+	map { $highsuccesses++ if $log{$_}{filteroutcome} eq "high confidence" } keys %log;
+	map { $lowsuccesses++ if $log{$_}{filteroutcome} eq "low confidence" } keys %log;
 	printf "\n$script successfully selected $highsuccesses high confidence and $lowsuccesses low confidence sequences from %d files with given filtering parameters, see log for details\n",scalar keys @files ;
 }
 
@@ -256,17 +257,17 @@ open my $logcsv, '>', "$outpath/select.$mode.log.csv";
 my @head = (@{$stats{general}},@params,@{$stats{group}},@{$stats{filter}});
 print $logcsv join(',',@head);
 
-open my $outhighfa, '>', "$outpath/select.sequences.highconfidence.fa" if($mode eq 'batch');
-open my $outlowfa, '>', "$outpath/select.sequences.highconfidence.fa" if($mode eq 'batch');
+open my $outhighfa, '>', "$outpath/select.sequences.highconfidence.fa" if($mode eq 'batch' and $highsuccesses>0);
+open my $outlowfa, '>', "$outpath/select.sequences.lowconfidence.fa" if($mode eq 'batch' and $lowsuccesses>0);
 
 foreach my $i (keys %log){
 	print $logcsv "\n",join(',',@{$log{$i}}{@head});
-	print $outhighfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and ${$log{$i}}{filteroutcome} eq 'high');
-	print $outlowfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and ${$log{$i}}{filteroutcome} eq 'low');
+	print $outhighfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and $highsuccesses>0 and ${$log{$i}}{filteroutcome} eq 'high confidence');
+	print $outlowfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and $lowsuccesses>0 and ${$log{$i}}{filteroutcome} eq 'low confidence');
 }
 close $logcsv;
-close $outhighfa if($mode eq 'batch');
-close $outlowfa if($mode eq 'batch');
+close $outhighfa if($mode eq 'batch' and $highsuccesses>0);
+close $outlowfa if($mode eq 'batch' and $lowsuccesses>0);
 
 print "\nCSV log successfully written to $outpath/select.$mode.log.csv\n";
 print "Fastas of selected sequences successfully written to $outpath/\n" if($mode eq 'batch');
