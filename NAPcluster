@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.6.5"; #12/03/2018
+my $version = "0.6.6"; #10/04/2018
 
 my $help;
 my $outpath;
@@ -1032,7 +1032,8 @@ sub parse_parameters {
 	my %param_expand;
 	my @paramarray;
 	my $n_singleparams;
-	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-;]*$/ } values %$inparams;
+	print "Debug: input parameter hash follows:\n", Dumper $inparams if $debug;
+	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,\-;]*$/ } values %$inparams};
 	foreach my $param (keys %$inparams){
 		push @paramarray,$param;
 		if($inmode eq "batch"){
