@@ -18,7 +18,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.4.2"; #12/03/2018
+my $version = "0.5.0"; #10/04/2018
 
 my $help;
 my $outpath;
