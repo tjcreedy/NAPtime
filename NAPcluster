@@ -1033,7 +1033,7 @@ sub parse_parameters {
 	my @paramarray;
 	my $n_singleparams;
 	print "Debug: input parameter hash follows:\n", Dumper $inparams if $debug;
-	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,\-;]*$/ } values %$inparams};
+	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,\-;]*$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
 		push @paramarray,$param;
 		if($inmode eq "batch"){
