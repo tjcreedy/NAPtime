@@ -60,6 +60,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "pvalue=s"		=> \$parameters{pvalue},
 	   "threshold_pvalue=f"	=> \$parameters{pvalue_maxthreshold},
 	   "identitypc=s"	=> \$parameters{identity},
+	   "maxgroupscheck=i"	=> \$parameters{maxgroupscheck},
 	   "display=s"		=> \$display,
 	   "threads=i"		=> \$threads,
 	   "blastpath=s"	=> \$blastpath,
@@ -118,6 +119,7 @@ my %paramdefaults = (
 	'pvalue'		=> 0,
 	'pvalue_maxthreshold'	=> 0.5,
 	'identity'		=> 0.99,
+	'maxgroupscheck'	=> 10
 );
 
 $paramdefaults{bootstraps} = 10 if $debug;
@@ -125,7 +127,7 @@ print "Debug mode has reset the number of bootstraps to 10\n" if $debug;
 
 #print Dumper \%paramdefaults;
 my @params = ('seqlength','length_var','nest','minsize','bootstraps','blasthits','blasttarget',
-		'pvalue','blastthreshold','pvalue_maxthreshold','identity');
+		'pvalue','blastthreshold','pvalue_maxthreshold','identity','maxgroupscheck');
 
 $mode = "stat" unless(defined $mode);
 die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
@@ -535,10 +537,14 @@ sub filter_groups{
 			
 			# Marginal significance, try grouping by similarity
 			
-			if($#gids_sorted == 0){  # First check if more than one group left
-				if($blastfail){
+			if($#gids_sorted == 0 or $gselection >= ${$specs}{maxgroupscheck}){  # First check if more than one group left or if we've already discarded too many groups
+				if($blastfail and $#gids_sorted == 0){
 					print timestamp(),": $printstring group $gselection not sufficiently similar to target taxon. No further groups exist. No sequence will be output.\n" if $verbose;
 					@log{@$loghead} = ('groups_exhausted','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
+					last;
+				} elsif($blastfail and $gselection >= ${$specs}{maxgroupscheck}){
+					print timestamp(),": $printstring group $gselection not sufficiently similar to target taxon. Reached maximum groups to check threshold. No sequence will be output.\n" if $verbose;
+					@log{@$loghead} = ('max_groups_reached','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
 					last;
 				} else {
 					print timestamp(),": $printstring group $gselection not sufficiently distinct and/or no further groups exist. The most frequent sequence will be considered, but will be written to lowconfidence output.\n" if $verbose;
