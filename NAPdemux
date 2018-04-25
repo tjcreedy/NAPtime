@@ -375,7 +375,7 @@ sub find_pairs {
 	}
 	foreach my $file (@allfiles){
 		my ($file_name,$dir)=fileparse($file);
-		if($file_name =~ /[^a-zA-Z\d]{0,1}([A-H])(\d{1,2})[^a-zA-Z\d].*_R([1|2])_/){
+		if(! defined $convert && $file_name =~ /[^a-zA-Z\d]{0,1}([A-H])(\d{1,2})[^a-zA-Z\d].*_R([1|2])_/){
 			my $n = $2+0;
 			$filepairs{$1.$n}[$3-1]=$file;
 		}elsif(defined $convert && $file_name =~ /(.+)_R([1|2])/){
