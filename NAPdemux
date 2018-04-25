@@ -26,8 +26,6 @@ my $pairs = "none";
 
 my $script = basename($0, ());
 
-$/ = '\R';
-
 ########################################################
 # USAGE
 #
@@ -399,10 +397,17 @@ sub parse_barcodefiles {
 	die "Error: Must specify three or four columns" unless($ncols==3 || $ncols==4);
 	my %tags;
 	foreach my $bc_table (@$inpaths){
+		my @rows;
+		{
+		local $/ = undef;
 		open my $bc_read, '<', $bc_table or die "Error: Couldn't read $bc_table\n";
-		while(my $row = <$bc_read>){
-			chomp $row;
-			$row =~ s/["'\r ]//g; #remove any quotation marks, spaces or DOS line endings
+		my $fileslurp = <$bc_read>;
+		close $bc_read;
+		@rows = split /\R/, $fileslurp;
+		}
+		
+		foreach my $row (@rows){
+			$row =~ s/["' ]//g; #remove any quotation marks or spaces
 			die "Error: illegal character in $bc_table, one of: ()[]{}\$\@\% in row:\n$row\n" if $row =~ /[\(\)\{\}\[\]\$\@\%]/;
 			my @line = split /[\t,]+/, $row; #split row of table by tabs and/or commas
 			my $sampleid;
@@ -426,7 +431,6 @@ sub parse_barcodefiles {
 		$tags{$well}{$sampleid}[1] = $line[$column_spec[2]-1];
 		}
 		
-		close $bc_read;
 	}
 	
 	return %tags;
