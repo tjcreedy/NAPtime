@@ -58,16 +58,17 @@ USAGE
 #
 ######################################################
 
-GetOptions("table=s"	=> \@tables_paths,
-	   "convert=s"	=> \$convert,
-	   "columns=s"	=> \$columns,
-	   "version=s"	=> \$version,
-	   "output=s"	=> \$outpath,
-	   "pairs=s"	=> \$pairs,
-	   "wipe"	=> \$wipe,
-	   "verbose"	=> \$verbose,
-	   "debug"	=> \$debug,
-	   "help"	=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
+GetOptions("table=s"		=> \@tables_paths,
+	   "convert=s"		=> \$convert,
+	   "columns=s"		=> \$columns,
+	   "errortolerance=s"	=> \$errortolerance,
+	   "version=s"		=> \$version,
+	   "output=s"		=> \$outpath,
+	   "pairs=s"		=> \$pairs,
+	   "wipe"		=> \$wipe,
+	   "verbose"		=> \$verbose,
+	   "debug"		=> \$debug,
+	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
 ########################################################
 # HEADER
