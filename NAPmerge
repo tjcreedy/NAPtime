@@ -298,7 +298,7 @@ sub trim {
 		$cutspec .= " --discard-untrimmed" if ${$primers}{sequence}{strict};
 	}
 	
-	my $cutadapt_cmd = "cutadapt $cutspec -o $outpath/trim/$name\_R1.fq -p $outpath/trim/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
+	my $cutadapt_cmd = "cutadapt $cutspec --minimum-length 1 --pair-filter any -o $outpath/trim/$name\_R1.fq -p $outpath/trim/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
 	
 	print "DEBUG: cutadapt command:\n$cutadapt_cmd\n" if $debug;
 	
@@ -325,7 +325,9 @@ sub merge_iteration {
 	my $pear_cmd = "pear -f $outpath/trim/${$iterations}{$iter}{name}\_R1.fq -r $outpath/trim/${$iterations}{$iter}{name}\_R2.fq -o $outpath/merge_$iter/${$iterations}{$iter}{name} -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
 	
 	print "Running PEAR on file ${$iterations}{$iter}{name} for iteration $iter with quality threshold ${$iterations}{$iter}{pearquality}\n" if $verbose;
+	print "DEBUG: PEAR command:\n$pear_cmd\n" if $debug;
 	my $asmbl_log=`$pear_cmd`;
+	print "DEBUG: PEAR log:\n$asmbl_log\n" if $debug;
 	$asmbl_log=~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s; #regex to extract data from pear_log
 	
 	my @pear_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
