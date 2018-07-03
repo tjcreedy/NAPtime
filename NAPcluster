@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.6.6"; #10/04/2018
+my $version = "0.6.7"; #03/07/2018
 
 my $help;
 my $outpath;
@@ -210,7 +210,7 @@ my %stats = (
 	filcat	=> ['files_in','total_unfiltered_readsin','total_reads_qualityfiltered','total_reads_qualitypassed','total_reads_concatenated'],
 	derep	=> ['sequence_length_variation_pc','minlength','maxlength','length_discarded','sequences_remain','n_groups','mean_groupsize','min_groupsize','max_groupsize'],
 	size	=> ['n_groups_discarded_<minsize','n_groups_discarded_unoise','n_chimeras_unoise','n_groups_remain'],
-	cluster	=> ['n_otus','n_chimeras_uchime','n_chimeras_cluster']
+	cluster	=> ['n_otus','n_chimeras_uchime','n_chimeras_cluster','n_reads_mapped']
 );
 
 #
@@ -476,7 +476,7 @@ sub filter_concat{
 		my %fasta = read_fasta($file,"check","order");
 	#	printf "$file has %d sequences\n", scalar keys %fasta if $debug;
 		warn "Warning: file $file is empty!\n" if(scalar keys %fasta < 1);
-		my ($name,$dir,$suffix) =fileparse($file);
+		my ($name,$dir,$suffix) = fileparse($file);
 		$name =~ s/^(.+)\.[^.]+$/$1/;
 		@allfasta{keys %fasta} = values %fasta;
 	}
@@ -485,7 +485,8 @@ sub filter_concat{
 	
 	print timestamp(),": concatenation of $files_in files has $concat_reads sequences\n\n" if $verbose;
 	die "Error, no sequences in any input fasta" if(scalar keys %allfasta<1);
-
+	
+	
 	my $allreads_raw = "$outpath/cluster.allreads_raw_e$eemax.fa";
 	open my $allraw, '>', $allreads_raw;
 	foreach my $id (keys %allfasta){
@@ -770,9 +771,11 @@ sub cluster_and_map{
 		print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
 	}
 	
-	convert_uc_and_write($ucpath,$mappath);
+	my $hits = convert_uc_and_write($ucpath,$mappath);
 	
-	print timestamp(),":$printstring completed mapping, map written to $mappath\n" if $verbose;
+	warn "WARNING: no reads mapped to OTUs!\n" if($hits == 0);
+	
+	print timestamp(),":$printstring completed mapping, $hits reads mapped to OTUs\n" if $verbose;
 	
 	#
 	# Final logging and output
@@ -781,7 +784,7 @@ sub cluster_and_map{
 	system("mv $mappath $outpath/map_iteration$iter.csv");
 	
 	@log{@$params} = @{${$iterations}{$iter}}{@$params};
-	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster);
+	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster,$hits);
 	
 	print timestamp(),":$printstring completed\n" if $verbose;
 	
@@ -1121,6 +1124,7 @@ sub read_fasta {
 	my $barcodelabelsadded = 0;
 	open my $fa_in, '<', $fapathin or die "Couldn't open $fapathin\n";
 	my $n;
+	my $lcwarn;
 	while(my $row = <$fa_in>){
 		chomp $row;
 		if($row =~ /^>(.+)$/){
@@ -1132,15 +1136,18 @@ sub read_fasta {
 			}
 			$id =~ s/\s/_/g;
 		} elsif($row =~ /^[ATCGNatcgn]+$/){
+			$lcwarn++ if($row =~ /[a-z]/);
 			if($order){
 				$fasta{$id}{order} = $n;
-				$fasta{$id}{seq} .= $row;
+				$fasta{$id}{seq} .= uc $row;
 			} else {
-				$fasta{$id} .= $row;
+				$fasta{$id} .= uc $row;
 			}
 		} else { die "Couldn't read fasta format in $fapathin\n" };
 	}
+	
 	close $fa_in;
+	print "File $fapathin contained lowercase bases. These bases may be ignored when mapping OTUs, so all sequences have been converted to upper case.\n" if $lcwarn;
 	print "File $fapathin missing barcode labels, \";barcodelabel=$name;\" appended to header of $barcodelabelsadded sequences\n" if $checklabel and $barcodelabelsadded and $verbose;
 	return %fasta;
 }
@@ -1151,12 +1158,14 @@ sub convert_uc_and_write {
 	my %otus;
 	my %samples;
 	open my $uc, '<', $ucpath or die "Error opening $ucpath\n";
+	my $hitcount = 0;
 	while(my $row = <$uc>){
 		chomp $row;
 		if($row =~ /^H.*barcodelabel=([^;]+);\t(.*)$/){
 			$tab{$1}{$2}++;
 			$samples{$1}++;
 			$otus{$2}=1;
+			$hitcount++;
 		}
 	}
 	close $uc;
@@ -1175,6 +1184,8 @@ sub convert_uc_and_write {
 		print $csv "\n";
 	}
 	close $csv;
+	
+	return $hitcount;
 }
 
 sub datestamp{
