@@ -276,6 +276,7 @@ my %sort_log;
 
 my $bpm = Parallel::ForkManager->new($threads);
 my $bpm_done=0;
+my @n_groups_remain_swd;
 
 my $n_size_denoise_its = (scalar @{${$expand_parameters}{denoise}} * scalar @{${$expand_parameters}{length_var}} * scalar @{${$expand_parameters}{minsize}} * scalar @{${$expand_parameters}{eemax}});
 
@@ -289,6 +290,7 @@ $bpm->run_on_finish( sub {
 	my $lvar = $bpm_outdata->{lvar};
 	my $mins = $bpm_outdata->{mins};
 	$sort_log{$eemax}{$dns}{$lvar}{$mins} = $bpm_outdata->{slog};
+	push @n_groups_remain_swd, ${$bpm_outdata}{slog}{n_groups_remain};
 });
 
 print "\nStarting size sorting and denoising\n\n" if $verbose and $mode eq "batch";
@@ -310,6 +312,13 @@ foreach my $eemax (@{${$expand_parameters}{eemax}}){
 $bpm->wait_all_children;
 print "\n";
 
+
+if( all {$_ == 0} @n_groups_remain_swd ){
+	die "ERROR: no size sorting and denoising iterations returned any reads for clustering. You should check your -seqlength, -length_var and/or -minsize settings\n";
+} elsif( any {$_ == 0} @n_groups_remain_swd ){
+	warn "WARNING: one or more size sorting and denoising iterations returned no reads. Check the terminal messages or the logs for details\n";
+}
+
 #
 # Do clustering and mapping pipeline
 #
@@ -317,6 +326,7 @@ my %cluster_log;
 
 my $pm = Parallel::ForkManager->new($threads);
 my $done_iterations=0;
+my @cam_otus;
 
 $pm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $pm_outdata) = @_;
@@ -326,6 +336,7 @@ $pm->run_on_finish( sub {
 	my $iter = $pm_outdata->{iter};
 	$cluster_log{$iter} = $pm_outdata->{log};
 	$otusets{$iter} = $pm_outdata->{otus};
+	push @cam_otus, ${$pm_outdata}{log}{n_otus};
 });
 
 print "Starting clustering\n" if $verbose and $mode eq "batch";
@@ -334,13 +345,18 @@ printf "Starting %d clustering iterations using $threads threads \n", ($#n_iter+
 foreach my $iter (keys %$iterations){;
 	my $pid = $pm->start and next;
 	
-	my ($log,$otus) = cluster_and_map($pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs);
+	my ($log,$otus) = cluster_and_map($pathroot,$iterations,$iter,\@params,\%stats,$maxmapseqs,\%sort_log);
 	
 	$pm->finish(0, {log => $log, otus => $otus, iter => $iter});
 }
 
 $pm->wait_all_children;
 print "\n";
+
+if( any {$_ == 0} @cam_otus ){
+	warn "WARNING: one or more clustering iterations returned no otus. Check the terminal messages or the logs for details\n";
+}
+
 
 #
 # Process otus
@@ -357,21 +373,25 @@ if($doblast){
 
 	my %seqstoblast;
 	@seqstoblast{1..scalar keys %allotuseqs} = keys %allotuseqs;
-
-	my $taxonomies = batch_taxonomyblast(\%seqstoblast,\%blastparams);
-#	print Dumper $taxonomies;
-	my $taxonomypath = "$outpath/cluster.otus.taxonomy.csv";
-	open my $taxout, '>', $taxonomypath;
-	print $taxout "iteration,otu_id,duplicate,taxonomy_lineage,nhits,n_contributing_lineages,prop_contributing_lineages,top_contributor_id,mean_contributor_id,mean_contributor_score\n";
-	foreach my $id (keys %seqstoblast){
-		my @duplicates = @{$allotuseqs{$seqstoblast{$id}}};
-		foreach my $i (0..$#duplicates){
-			print $taxout "$duplicates[$i],$i,",join(";",@{${$taxonomies}{$id}{bgt}}),",${$taxonomies}{$id}{nhits},${$taxonomies}{$id}{nmatch},${$taxonomies}{$id}{prop},";
-			print $taxout "${$taxonomies}{$id}{topid},${$taxonomies}{$id}{id},${$taxonomies}{$id}{score}\n";
+	
+	if( scalar keys %seqstoblast > 0){
+		my $taxonomies = batch_taxonomyblast(\%seqstoblast,\%blastparams);
+	#	print Dumper $taxonomies;
+		my $taxonomypath = "$outpath/cluster.otus.taxonomy.csv";
+		open my $taxout, '>', $taxonomypath;
+		print $taxout "iteration,otu_id,duplicate,taxonomy_lineage,nhits,n_contributing_lineages,prop_contributing_lineages,top_contributor_id,mean_contributor_id,mean_contributor_score\n";
+		foreach my $id (keys %seqstoblast){
+			my @duplicates = @{$allotuseqs{$seqstoblast{$id}}};
+			foreach my $i (0..$#duplicates){
+				print $taxout "$duplicates[$i],$i,",join(";",@{${$taxonomies}{$id}{bgt}}),",${$taxonomies}{$id}{nhits},${$taxonomies}{$id}{nmatch},${$taxonomies}{$id}{prop},";
+				print $taxout "${$taxonomies}{$id}{topid},${$taxonomies}{$id}{id},${$taxonomies}{$id}{score}\n";
+			}
 		}
+		close $taxout;
+		print "Completed, taxonomies written to $taxonomypath\n";
+	} else {
+		print "WARNING: no OTUs to BLAST, no taxonomies can be output\n";
 	}
-	close $taxout;
-	print "Completed, taxonomies written to $taxonomypath\n";
 }
 #
 # Output results log
@@ -565,7 +585,7 @@ sub sort_write_denoise{
 	
 	my $ngroup = scalar keys %$dereplicated;
 	
-	printf timestamp(), " : starting size sorting iteration with min size $mins%s, pid $$\n", $eemax eq "NA" ? " without denoising" : "with denoising", if $verbose;
+	printf "%s: starting size sorting iteration with min size $mins %s, pid $$ \n", timestamp(), $eemax eq "NA" ? " without denoising" : "with denoising", if $verbose;
 	
 	#
 	# Output sequences size sorted
@@ -597,7 +617,7 @@ sub sort_write_denoise{
 	my $nseq_discarded_unoise="NA";
 	my $n_chimeras_unoise="NA";
 	
-	if($dns eq "yes" ){
+	if($dns eq "yes" and $n_groups_remain > 0){
 		print timestamp(),":$printstring performing unoise\n" if $verbose;
 		
 		my $denoise_cmd = "usearch92 -unoise2 $sortpath -fastaout $denoisepath 2>&1";
@@ -621,7 +641,7 @@ sub sort_write_denoise{
 
 
 sub cluster_and_map{
-	my ($pathroot,$iterations,$iter,$params,$stats,$maxmapseqs) = @_;
+	my ($pathroot,$iterations,$iter,$params,$stats,$maxmapseqs,$sort_log) = @_;
 	
 	my %log;
 	
@@ -629,6 +649,16 @@ sub cluster_and_map{
 	my $printstring = join "", ($threads>1 and scalar keys %$iterations>1) ? " pid $$" : "" , scalar keys %$iterations>1 ? " iteration $iter" : "";
 	
 	#print Dumper ${$iterations}{$iter};
+	
+	#
+	# Check if sort_write_denoise actually output any reads for this iteration
+	#
+	
+	my $swd_ngr = ${$sort_log}{${$iterations}{$iter}{eemax}}{${$iterations}{$iter}{denoise}}{${$iterations}{$iter}{length_var}}{${$iterations}{$iter}{minsize}}{n_groups_remain};
+	
+		print "Debug: value of \$swd_ngr is $swd_ngr\n" if $debug;
+	
+	print "WARNING: $printstring no reads available, clustering will be skipped\n" if($swd_ngr == 0);
 	
 	#
 	# Prepare paths
@@ -656,7 +686,7 @@ sub cluster_and_map{
 	
 	my $n_chimeras_uchime = "NA";
 	my $clusterinput = $chimerainput;
-	if(${$iterations}{$iter}{filter_chimeras} eq "yes" or ${$iterations}{$iter}{filter_chimeras} eq "swarm"){
+	if($swd_ngr > 0 and ( ${$iterations}{$iter}{filter_chimeras} eq "yes" or ${$iterations}{$iter}{filter_chimeras} eq "swarm" )){
 		if(${$iterations}{$iter}{denoise} eq "yes"){
 			print timestamp(),":$printstring filtering chimeras already performed by denoising, skipping\n" if $verbose;
 		} else {
@@ -676,7 +706,9 @@ sub cluster_and_map{
 	}
 	
 	my ($nOTUs,$n_chimeras_cluster);
-	if (${$iterations}{$iter}{cpv} == 0){
+	if ($swd_ngr == 0){
+		($nOTUs,$n_chimeras_cluster) = (0,"NA");
+	} elsif (${$iterations}{$iter}{cpv} == 0){
 		print timestamp(),":$printstring clustering skipped because cpv is 0\n" if $verbose;
 		system("cp $clusterinput $otuspath");
 		my $seqs = `cat $clusterinput | grep -c '^>'`;
@@ -714,79 +746,85 @@ sub cluster_and_map{
 		}
 	}
 #	close $fh;
-	print timestamp(),":$printstring completed clustering, $nOTUs OTUs written to $otuspath\n" if $verbose;
+	print timestamp(),":$printstring completed clustering, $nOTUs OTUs written to $otuspath\n" if $verbose and $swd_ngr > 0;
 	
-	#
-	# Read OTUs to hash for output
-	#
+	my $hits = "NA";
+	my %otus_rev;
 	
-	my %otus = read_fasta($otuspath);
-	my %otus_rev = map { $otus{$_} => $_ } keys %otus;
-	
-	#
-	# Map OTUs
-	#
-	
-	my $allreads_raw = "$outpath/cluster.allreads_raw_e${$iterations}{$iter}{eemax}.fa";
-	
-	my $idpc;
-	my $mapcmd;
-	if(${$iterations}{$iter}{cpv} == 0){
-#		$idpc=0.999;
-		$mapcmd = "usearch80 -search_exact $allreads_raw -db $otuspath -strand plus -uc $ucpath -threads 1 2>&1"
+	if($nOTUs == 0){
+		print "WARNING: $printstring no OTUs, skipping mapping\n";
 	} else {
-		$idpc=1-(${$iterations}{$iter}{cpv}/100);
-		$mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath -threads 1 2>&1";
-	}
-	print timestamp(),":$printstring starting mapping all reads to OTUs using",$idpc ? " id $idpc\n" : " exact matches only\n" if $verbose;
-
-	print "Debug: map command $mapcmd\n" if $debug;
-	my $maplog=`$mapcmd`;
-	print "Debug: map log\n$maplog\n" if $debug;
-	if($maplog =~ /File\ssize\stoo\sbig/s){
-		undef $maplog;
-		unlink $ucpath;
-		print timestamp(),":$printstring initial mapping failed, likely for too many sequences, attempting iterative mapping mode\n" if $verbose;
-		my $ninseqs = `cat $allreads_raw | grep -c '^>'`;
-		my $map_iterations = ceil($ninseqs/$maxmapseqs);
+		#
+		# Read OTUs to hash for output
+		#
 		
-		#print timestamp(),":$printstring maplication loop $loop on file $allreads_raw with $ninseqs sequences, concatenating to $map_loop_out over $map_iterations iterations\n" if $verbose;
-		foreach my $it (1..$map_iterations){
-			my $linemin = 2*$maxmapseqs*($it-1)+1;
-			my $linemax = 2*$maxmapseqs*$it;
-			my $tempin = $pathroot."mapitersubin_$it.fa";
-			my $tempout = $pathroot."mapitersubout_$it.uc";
-			print timestamp(),":$printstring starting mapping iteration $it using lines $linemin to $linemax of $allreads_raw in temporary file $tempin\n" if $verbose;
-			my $subcmd = "sed -n $linemin,$linemax"."p $allreads_raw > $tempin";
-			system("$subcmd");
-			my $map_cmd = "usearch80 -usearch_global $tempin -db $otuspath -strand plus -id $idpc -uc $tempout 2>&1";
-			print "Command: $map_cmd\n" if $debug;
-			my $maplog = `$map_cmd`;
-			print "Log:\n$maplog\n" if $debug;
-			printf "%s\n", (split("\n",$maplog))[7];
-			system("cat $tempout >> $ucpath");
-			system("rm $tempin $tempout") unless $debug;
-			print timestamp(),":$printstring completed iteration $it, $tempout concatenated to $ucpath and temporary files deleted\n";
+		my %otus = read_fasta($otuspath);
+		%otus_rev = map { $otus{$_} => $_ } keys %otus;
+		
+		#
+		# Map OTUs
+		#
+		
+		my $allreads_raw = "$outpath/cluster.allreads_raw_e${$iterations}{$iter}{eemax}.fa";
+		
+		my $idpc;
+		my $mapcmd;
+		if(${$iterations}{$iter}{cpv} == 0){
+	#		$idpc=0.999;
+			$mapcmd = "usearch80 -search_exact $allreads_raw -db $otuspath -strand plus -uc $ucpath -threads 1 2>&1"
+		} else {
+			$idpc=1-(${$iterations}{$iter}{cpv}/100);
+			$mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath -threads 1 2>&1";
 		}
-		print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
+		print timestamp(),":$printstring starting mapping all reads to OTUs using",$idpc ? " id $idpc\n" : " exact matches only\n" if $verbose;
+
+		print "Debug: map command $mapcmd\n" if $debug;
+		my $maplog=`$mapcmd`;
+		print "Debug: map log\n$maplog\n" if $debug;
+		if($maplog =~ /File\ssize\stoo\sbig/s){
+			undef $maplog;
+			unlink $ucpath;
+			print timestamp(),":$printstring initial mapping failed, likely for too many sequences, attempting iterative mapping mode\n" if $verbose;
+			my $ninseqs = `cat $allreads_raw | grep -c '^>'`;
+			my $map_iterations = ceil($ninseqs/$maxmapseqs);
+			
+			#print timestamp(),":$printstring maplication loop $loop on file $allreads_raw with $ninseqs sequences, concatenating to $map_loop_out over $map_iterations iterations\n" if $verbose;
+			foreach my $it (1..$map_iterations){
+				my $linemin = 2*$maxmapseqs*($it-1)+1;
+				my $linemax = 2*$maxmapseqs*$it;
+				my $tempin = $pathroot."mapitersubin_$it.fa";
+				my $tempout = $pathroot."mapitersubout_$it.uc";
+				print timestamp(),":$printstring starting mapping iteration $it using lines $linemin to $linemax of $allreads_raw in temporary file $tempin\n" if $verbose;
+				my $subcmd = "sed -n $linemin,$linemax"."p $allreads_raw > $tempin";
+				system("$subcmd");
+				my $map_cmd = "usearch80 -usearch_global $tempin -db $otuspath -strand plus -id $idpc -uc $tempout 2>&1";
+				print "Command: $map_cmd\n" if $debug;
+				my $maplog = `$map_cmd`;
+				print "Log:\n$maplog\n" if $debug;
+				printf "%s\n", (split("\n",$maplog))[7];
+				system("cat $tempout >> $ucpath");
+				system("rm $tempin $tempout") unless $debug;
+				print timestamp(),":$printstring completed iteration $it, $tempout concatenated to $ucpath and temporary files deleted\n";
+			}
+			print timestamp(),":$printstring completed $map_iterations iterations, results concatenated to $ucpath\n" if $verbose;
+		}
+		
+		$hits = convert_uc_and_write($ucpath,$mappath);
+		
+		warn "WARNING: no reads mapped to OTUs!\n" if($hits == 0);
+		
+		print timestamp(),":$printstring completed mapping, $hits reads mapped to OTUs\n" if $verbose;
+		
 	}
-	
-	my $hits = convert_uc_and_write($ucpath,$mappath);
-	
-	warn "WARNING: no reads mapped to OTUs!\n" if($hits == 0);
-	
-	print timestamp(),":$printstring completed mapping, $hits reads mapped to OTUs\n" if $verbose;
 	
 	#
 	# Final logging and output
 	#
-	system("mv $otuspath $outpath/otus_iteration$iter.fa");
-	system("mv $mappath $outpath/map_iteration$iter.csv");
+	system("mv $otuspath $outpath/otus_iteration$iter.fa") if($swd_ngr > 0);
+	system("mv $mappath $outpath/map_iteration$iter.csv") if($nOTUs >0);
 	
 	@log{@$params} = @{${$iterations}{$iter}}{@$params};
 	@log{@{${$stats}{cluster}}} = ($nOTUs,$n_chimeras_uchime,$n_chimeras_cluster,$hits);
-	
-	print timestamp(),":$printstring completed\n" if $verbose;
 	
 	return (\%log,\%otus_rev);
 }
