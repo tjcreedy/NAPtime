@@ -18,7 +18,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.5.0"; #10/04/2018
+my $version = "0.5.1"; #23/07/2018
 
 my $help;
 my $outpath;
@@ -41,7 +41,7 @@ Description:
 
 	This is $script version $version of the NGS Amplicon Pipeline. It carries out either barcode selection or clustering of one or several fastas. When selecting barcodes, there are three modes: viewing statistics for a single file, running one or several files in batch mode with a set of parameters, or iterating through range(s) of parameter(s) to explore parameter space. Clustering only has the latter two modes.
 	
-	For more details, see the google doc documentation.
+	For more details, see the github wiki at https://github.com/tjcreedy/NAPtime/wiki/NAPselect.
 	
 USAGE
 #
@@ -156,7 +156,7 @@ if(!defined $outpath){
 if(!$blastpath){
 	my $host = hostname;
 	my %paths = (
-		'ctag' => '/dh/blastdb/nt',
+		'ctag' => '/df/blastdb-2018-06-17/nt',
 		'hpc-watson' => '/db/blastdb-2018-02-07/nt',
 		'hpc-crick' => '/db/blastdb-2018-02-07/nt'
 	);
