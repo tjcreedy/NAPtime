@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 #By Thomas J Creedy, thomas@tjcreedy.co.uk
 
 use warnings;
@@ -19,7 +19,7 @@ use Data::Dumper;
 use Storable;
 use File::Slurp qw(read_file write_file);
 
-my $version = "0.6.7"; #03/07/2018
+my $version = "0.6.8"; #07/11/2018
 
 my $help;
 my $outpath;

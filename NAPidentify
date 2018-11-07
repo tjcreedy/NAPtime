@@ -1,0 +1,593 @@
+#!/usr/bin/env perl
+#By Thomas J Creedy, thomas@tjcreedy.co.uk
+
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use List::Util qw(sum all any min max); 
+use List::MoreUtils qw(pairwise);
+use Algorithm::Loops qw(NestedLoops);
+use POSIX;
+use LWP::Simple;
+use Parallel::ForkManager;
+use Sys::Hostname;
+use Time::HiRes qw(time usleep);
+####Dev####
+use Data::Dumper;
+use Storable;
+use File::Slurp qw(read_file write_file);
+
+my $version = "0.0.2"; #07/11/2018
+
+my $input;     # path to a fasta of sequences to blast
+my @boldpaths; # one or more paths to bold fasta files to make into a blastdb (O,M)
+my $result;    # name of a file to save the blast result to (R)
+my $identification;  # name of a file to save a rough identification to (O)
+my $blastfmt;  # format of $result
+my $gbpath;    # if not guessed from machine name
+my $savedb;    # whether to save the bold blast databases made
+my $gb;        # whether or not to use genbank
+
+my %blastparams =(
+	blasthits => 25,
+	assignsens => 0.4
+);
+
+my $help;
+our $debug;
+our $threads = 1;
+our $verbose;
+
+my $script = basename($0,());
+
+########################################################
+# USAGE
+#
+my $usage =<<USAGE;
+
+Description:
+
+	This is $script version $version of the NGS Amplicon Pipeline.
+	
+USAGE
+#
+######################################################
+
+GetOptions("input=s"		=> \$input,
+	   "boldpath=s"		=> \@boldpaths,
+	   "result=s"		=> \$result,
+	   "identification=s"	=> \$identification,
+	   "blastfmt=s"		=> \$blastfmt,
+	   "genbankpath=s"	=> \$gbpath,
+	   "usegenbank"		=> \$gb,
+	   "savedb"		=> \$savedb,
+	   "threads=i"		=> \$threads,
+	   "verbose"		=> \$verbose,
+	   "debug"		=> \$debug,
+	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
+
+
+########################################################
+# HEADER
+#
+#my $timedate = timestamp()." ".datestamp();
+#my $timer = "100000";
+#my $title =<<TITLE;
+#  _   _          _____  _   _                 
+# | \\ | |   /\\   |  __ \\| | (_)                
+# |  \\| |  /  \\  | |__) | |_ _ _ __ ___   ___  
+# | . ` | / /\\ \\ |  ___/| __| | '_ ` _ \\ / _ \\ 
+# | |\\  |/ ____ \\| |    | |_| | | | | | |  __/ 
+# |_| \\_/_/    \\_\\_|     \\__|_|_| |_| |_|\\___| 
+#TITLE
+#foreach my $line (split '\n',$title){
+#	print $line,"\n";
+#	usleep($timer);
+#}
+
+#print "\nWelcome. This is $script version $version, started at $timedate.\n";
+
+#print "$usage\n" and exit if($help);
+
+#print "\nChecking your inputs...\n";
+
+#$verbose = 1 if $debug;
+#print "\n#### Running in debug mode ####\n\n" if $debug;
+
+#if(scalar @ARGV == 0){
+#	if($debug){
+#		warn "No input files, running for debug purposes only. There may be errors.\n";
+#	} else {
+#		die "I need me some files to work on, see \"$script --help\" for more information\n";
+#	}
+#}
+
+#
+#
+########################################################
+
+#
+# Check inputs
+#
+if($input){
+	print "$input will be BLASTed against database(s)\n";
+	die "Error: the path to a file to save the BLAST results in is required using -result <path>\n" unless $result;
+	die "Error: please specify the output format for the blast results using -blastfmt\n" unless $blastfmt;
+} else {
+	print "No input file to BLAST, just creating database(s)\n";
+	die "Error: no databases to create if no bold files are given using -boldpath\n" unless(@boldpaths);
+	die "Error: no point in just creating database(s) if -savedb is not set\n" unless $savedb;
+	print "No input file, -result is redundant\n" if $result;
+	print "No input file, BLAST parameters are redundant\n" if $blastfmt;
+}
+
+if(@boldpaths){
+	if($gb or $gbpath){
+		print "BLAST database will be comprised of both Genbank and BOLD data\n";
+	} else {
+		print "BLAST database will be comprised of only BOLD fasta(s)\n";
+	}
+} else {
+	warn "Warning: -savedb is redundant if no BOLD fasta(s) are given using -boldpath\n" if $savedb;
+	if($gb or $gbpath){
+		print "BLAST database will be comprised of only Genbank data\n";
+	} else {
+		die "Error: please specify one of -usegenbank or -genbankpath to use Genbank data and/or -boldpath to use BOLD data\n";
+	}
+}
+
+die "Sorry, identification is not yet implemented. Please try again later\n" if $identification;
+
+#
+# Set up some paths
+#
+
+my $boldfile = "concatbold.fa";
+my $dbdirectory = "NAPidentify_blastDB_".timestamp()."_".datestamp();
+my $database;
+
+#
+# Check for blast database
+#
+
+if(!$gbpath and $gb){
+	my $host = hostname;
+	my %paths = (
+		'ctag' => '/dh/blastdb/nt',
+		'hpc-watson' => '/db/blastdb-2018-02-07/nt',
+		'hpc-crick' => '/db/blastdb-2018-02-07/nt'
+	);
+	if(exists($paths{$host})){
+		$gbpath = $paths{$host};
+	} else {
+		die "Error: no path to BLAST database found, please give me one using --genbankpath <path>\n";
+	}
+};
+
+
+#
+# Deal with BOLD data and create bold blastDB
+#
+
+if(@boldpaths){
+	my %boldseqs;
+	my %dupcheck;
+	my $n;
+	
+	foreach my $bold (@boldpaths){
+		open my $fa_in, '<', $bold or die "Couldn't open $bold\n";
+		my ($seqid,$taxon);
+		while(my $row = <$fa_in>){
+			chomp $row;
+			if($row =~ /^>(.+)$/){						# If the row is a fasta header row
+				my $head = $1;						## Save regex match
+				$n++;							## Increment sequence counter
+				
+				# Check the previous sequence
+				if($seqid){						## Check the previous sequence was actually used
+					if($dupcheck{$boldseqs{$seqid}{seq}}){		## Check if previous sequence already exists
+						delete $boldseqs{$seqid};		### If so, delete the previous sequence
+					} else {
+						$dupcheck{$boldseqs{$seqid}{seq}} = 1;	### If not, add the previous sequence to the duplicate checking hash
+					}
+				}
+				
+				# Parse the header
+				$head =~ s/\s/_/g;					## Replace spaces with underscores
+				my @id = split /|/, $head;				## Split the header by |
+				my $taxon = $id[1];					## Set the taxon as the second header value
+				if($id[3]){						## If the third header value (GENBANK ID) exists
+					$id[3] =~ /^([^\-]*)\-?/;			### Extract the part before the hyphen (if it exists)
+					$seqid = $1					### Set the sequence id as this
+				} else {						## If not
+					$seqid = $id[0]					### Set the sequence id as the first header value (BOLD ID)
+				}
+				
+				# Decide whether to use this sequence
+				if($boldseqs{$seqid}){					## Check if sequence id already exists
+					undef $seqid;					### If so, delete this value to set $seqid to false
+				} else {
+					$boldseqs{$seqid}{header} = "$seqid|$taxon";	### If not, create a new value and set the header to the sequence id and taxon
+				}
+			} elsif($row =~ /^[ATCGNatcgn\-]+$/){				# If the row contains sequence data or gaps
+				$row =~ s/\-//g;					## Remove any gaps
+				$boldseqs{$seqid}{seq} .= $row if $seqid;		## Concatenate the data to the sequence value of the current sequence object if it is being saved
+			} else { die "Couldn't read fasta format in $bold\n" };
+		}
+		close $fa_in;
+	}
+	
+	undef %dupcheck;
+	
+	printf "BOLD files had $n total sequences, of which %d were used after filtering duplicate sequences and sequence ids\n",scalar keys %boldseqs;
+	
+	
+	# Output the cleaned bold file and create blast database
+	
+	open my $fa_out, '>', $boldfile or die "Couldn't open $boldfile for writing\n";
+	foreach my $seqid (sort keys %boldseqs){
+		print $fa_out ">$boldseqs{$seqid}{header}\n$boldseqs{$seqid}{seq}";
+	}
+	close $fa_out;
+	
+	make_path($dbdirectory);
+	my $makecommand = "makeblastdb -in $boldfile -out $dbdirectory/bold -title bold -dbtype nucl -parse_seqids";
+	system($makecommand);
+}
+
+#
+# Create merged database if required, and set the final database path
+#
+
+if($gbpath){
+	if(@boldpaths){
+		my $mergecommand = "blastdb_aliastool -dblist $gbpath $dbdirectory/bold -dbtype nucl -out $dbdirectory/merge -title merge";
+		system($mergecommand);
+		$database = "$dbdirectory/merge";
+	} else {
+		$database = $gbpath;
+	}
+} else {
+	$database = "$dbdirectory/bold";
+}
+
+#
+# Run BLAST on the database if requested
+#
+
+if($input){
+	my $blastcmd = "blastn -db $database -query $input -outfmt $blastfmt -out $result -num_threads $threads -evalue 0.001";
+	system($blastcmd);
+}
+
+#
+# Do identification
+#
+
+#TODO
+
+#
+# Clean up
+#
+
+if(!$savedb){
+	unlink $boldfile;
+	remove_tree $dbdirectory;
+}
+
+exit;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+sub batch_taxonomyblast{
+	my ($queryhash,$parameters) = @_;
+	my $querypath = "tempblastfasta.fa";
+	my @ids = keys %$queryhash;
+	my %out;
+	my $maxcalls = 200;
+	# output fasta
+	open my $ofa, '>', $querypath;
+	foreach my $id (keys %$queryhash){
+		print $ofa ">$id\n${$queryhash}{$id}\n";
+	}
+	close $ofa;
+	
+	# blast
+	printf "%d sequences to BLAST, this %s\n",scalar @ids, scalar @ids/${$parameters}{blastthreads}>6 ? scalar @ids/${$parameters}{blastthreads}>12 ? "will take some time" : "may take some time" : "won't take too long";
+	my $blastcmd = "blastn -query $querypath -db ${$parameters}{gbpath} -num_threads ${$parameters}{blastthreads} -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 qseqid sacc bitscore pident\"";
+	my $blastdump;
+	my $blasttries = 0;
+	while(!$blastdump && $blasttries<5){
+		$blasttries++;
+		$blastdump = qx(bash -c '$blastcmd');
+	}
+#	open my $bd, '>', "blastdump.txt";
+#	print $bd $blastdump;
+#	close $bd;
+	if($blastdump){
+		print "Retrieving taxonomy information\n";
+		my ($hits,$accessions) = parse_blastdump($blastdump);
+		my $eutil_calls = ceil(scalar @$accessions/$maxcalls);
+		printf "%d hits to retrieve data for, this will take at least %d seconds\n",scalar @$accessions, $eutil_calls;
+		foreach my $call (1..$eutil_calls){
+			my $starttime = time;
+			my $min = ($call-1)*$maxcalls;
+			my $max = $call*$maxcalls-1;
+			$max = $max>$#{$accessions} ? $#{$accessions} : $max;
+			print "eutil call $call for hits $min to $max...";
+			my $accessionstring = join ",",@{$accessions}[$min..$max];
+			my $nucdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta");
+			my ($taxids,$taxidstring) = parse_nucdump($nucdump);
+			my $taxdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
+			my $lineages = parse_taxdump($taxdump);
+			$hits = merge_data($hits,$taxids,$lineages);
+			my $duration = time - $starttime;
+			print "took $duration seconds\n";
+			sleep (0.7-$duration) if ($duration<0.7); #ensures the frequency of eutil requests is lower than 3 per second, as recommended by NCBI.
+		}
+		store $hits, "hithashstore.log" if $debug;
+		print "Data retrieved, processing and making best guesses\n";
+		foreach my $qid (@ids){
+			if(!exists(${$hits}{$qid})){
+				$out{$qid}{nhits} = 0;
+				$out{$qid}{bgt} = ["NA"];
+				$out{$qid}{nmatch} = 0;
+				$out{$qid}{prop} = "NA";
+				$out{$qid}{score} = "NA";
+				$out{$qid}{id} = "NA";
+				$out{$qid}{topid} = "NA";
+				next;
+			}
+#			print "otu $qid ";
+			my @linaoa;
+			my @lin_acc;
+			foreach my $acc (keys %{${$hits}{$qid}}){
+				push @linaoa,[ split /;\s/,${$hits}{$qid}{$acc}{lineage} ];
+				push @lin_acc, $acc;
+				$out{$qid}{nhits}++;
+			}
+			
+			my @matchi = ((1) x scalar @linaoa);
+			my $totalhits = scalar @linaoa;
+			my $maxlength = max( map { $#{$_} } @linaoa );
+			my $outi = $maxlength;
+			my $prop;
+			my $nmatch;
+			foreach my $ti (0..$maxlength){
+				printf "run comparison for taxon $ti of %d lineages with maxlength of $maxlength taxa\n", scalar @linaoa if $debug;
+				#print Dumper \@linaoa;
+				my @testarray = map {$linaoa[$_][$ti]} (0..$#linaoa);
+				{ no warnings 'uninitialized';print join(',',@testarray),"\n" if $debug;}
+				@matchi = most_frequent_indices(@testarray);
+				print join(',',@matchi),"\n" if $debug;
+				printf "comparison found %d identical...",sum(@matchi) if $debug;
+				if(sum(@matchi)/$totalhits <= ${$parameters}{assignsens}){
+					$outi = $ti-1;
+					print "lineages too divergent, ending at taxon $outi\n" if $debug;
+					last;
+				}
+				$nmatch = sum(@matchi);
+				$prop = sum(@matchi)/$totalhits;
+				print "sufficient similarity, subsetting..." if $debug;
+				my @nextlinaoa;
+				foreach my $i (0..$#linaoa){
+					push @nextlinaoa,$linaoa[$i] if($linaoa[$i][$ti+1] and $matchi[$i]);
+				}
+				if(!@nextlinaoa){
+					$outi = $ti;
+					print "no further taxa for remaining lineages, ending at taxon $outi\n" if $debug;
+					last;
+				}
+				$maxlength = max( map { $#{$_} } @nextlinaoa );
+				printf "%d/$totalhits lineages remain for next comparison, new maxlength of $maxlength\n", scalar @nextlinaoa if $debug;
+				@linaoa = @nextlinaoa;
+			}
+			
+			my @ind = grep { $matchi[$_] == 1 } 0..$#matchi;
+			my @acc_used = @lin_acc[@ind];
+			$out{$qid}{bgt} = [ @{$linaoa[$ind[0]]}[0..$outi] ];
+			$out{$qid}{nmatch} = $nmatch;
+			$out{$qid}{prop} = $prop;
+			my @scores = map {${$hits}{$qid}{$_}{score}} @acc_used;
+			$out{$qid}{score} = sum(@scores)/scalar @scores;
+			my @ids = map {${$hits}{$qid}{$_}{pident}} @acc_used;
+			$out{$qid}{id} = sum(@ids)/scalar @ids;
+			$out{$qid}{topid} = max(@ids);
+		}
+	}
+	system("rm $querypath");
+	print Dumper \%out if $debug;
+	return \%out;
+}
+
+sub most_frequent_indices{
+	my (@items) = @_;
+	my %count;
+	foreach my $item (@items){
+		$count{$item}++ if($item);
+	}
+#	print Dumper \%count;
+	my $max = max(values %count);
+	my @mfis = map {!defined($_) ? 0 : $count{$_} == $max ? 1 : 0 } @items;
+	return @mfis;
+}
+
+sub merge_data{
+	my ($hits,$taxids,$lineages) = @_;
+	foreach my $qid (keys %$hits){
+		foreach my $acc (keys %{${$hits}{$qid}}){
+			if(exists(${$taxids}{$acc})){
+				my $tid = ${$taxids}{$acc};
+				${$hits}{$qid}{$acc}{tid} = $tid;
+				${$hits}{$qid}{$acc}{lineage} = ${$lineages}{$tid};
+			}
+		}
+	}
+	return $hits;
+}
+
+sub parse_blastdump{
+	my ($blastdump) = @_;
+	my %hits;
+	open my $bd, '<', \$blastdump;
+	my %acchash;
+	while(my $row = <$bd>){
+		chomp $row;
+		my @line = split /\t/, $row;
+		$hits{$line[0]}{$line[1]}{score} = $line[2];
+		$hits{$line[0]}{$line[1]}{pident} = $line[3];
+		$acchash{$line[1]} = 1;
+	}
+	close $bd;
+	my @accessions = keys %acchash;
+	return (\%hits,\@accessions);
+}
+
+sub parse_nucdump{
+	my ($nucdump) = @_;
+	my %tids;
+	open my $nd, '<', \$nucdump;
+	my @taxids;
+	my ($acc,$tid);
+	while(my $row = <$nd>){
+		chomp $row;
+#		print $row," - ";
+		if($row eq "<TSeq>"){
+			($acc,$tid) = (undef,undef);
+#			print "start of section, reset\n";
+		} elsif($row =~ /<TSeq_accver>([^.<]+)[^<]+<\/TSeq_accver>/){
+			$acc = $1;
+#			print "found accession $acc\n";
+		} elsif($row =~ /<TSeq_taxid>(\d+)<\/TSeq_taxid>/){
+			$tid = $1;
+#			print "found tid $tid\n";
+			push @taxids,$tid;
+		} elsif($row eq "<\/TSeq>"){
+			$tids{$acc} = $tid;
+#			print "end of section, placed tid into hash\n"; 
+#		} else {
+#			print "not relevant\n";
+		}
+	}
+	close $nd;
+	my $taxidstring = join(',',@taxids);
+	return (\%tids,$taxidstring);
+}
+
+sub parse_taxdump{
+	my ($taxdump) = @_;
+	my %lins;
+	open my $td, '<', \$taxdump;
+	my ($flag,$tid,$lineage, $species);
+	while(my $row = <$td>){
+		chomp $row;
+#		print $row, " - ";
+		if($row =~ /<Taxon>/){
+			$flag++;
+#			print "entering taxon of level $flag\n";
+		} elsif($row =~ /<TaxId>(\d+)<\/TaxId>/ and $flag == 1){
+			$tid = $1;
+#			print "found taxid $tid\n"
+		} elsif($row =~ /<Lineage>([^<]+)<\/Lineage>/ and $flag == 1){
+			$lineage = $1;
+#			print "found lineage $lineage\n";
+		} elsif($row =~ /<ScientificName>([^<]+)<\/ScientificName>/ and $flag == 1){
+			$species = $1;
+#			print "found lineage $lineage\n";
+		} elsif($row =~/<\/Taxon>/){
+#			print "end of taxon level $flag";
+			$flag--;
+			if($flag == 0){
+#				print "placing lineage into hash for tid and resetting\n";
+				$lins{$tid} = $lineage;
+				$lins{$tid} .= "; $species" if $species;
+				($tid,$lineage,$species) = (undef,undef,undef);
+#			} else {
+#				print "not yet at low enough level to add to hash\n";
+			}
+#		} else {
+#			print "not relevant\n";
+		}
+	}
+	close $td;
+	return \%lins;
+}
+
+sub timestamp{
+my @time = localtime;
+return sprintf "%02d:%02d:%02d",$time[2],$time[1],$time[0];
+}
+
+
+sub datestamp{
+my @time = localtime;
+return sprintf "%04d-%02d-%02d",$time[5]+1900,$time[4]+1,$time[3];
+}

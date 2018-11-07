@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 #By Thomas J Creedy, thomas@tjcreedy.co.uk
 
 use warnings;
@@ -11,7 +11,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.1.3"; #12/03/2018
+my $version = "0.1.4"; #07/11/2018
 
 my $help;
 my @tables_paths;
