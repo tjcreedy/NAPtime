@@ -16,7 +16,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.3.2"; #07/11/2018
+my $version = "0.3.3"; #16/11/2018
 my $help;
 my $outpath;
 my %parameters;
@@ -341,12 +341,13 @@ sub merge_iteration {
 		$log .= ",NA,NA,NA,NA\n";
 	} else {
 		$log .= ",${$iterations}{$iter}{eemax}";
-		my $filter_cmd = "usearch70 -fastq_filter $outpath/merge_$iter/${$iterations}{$iter}{name}.assembled.fastq -fastaout $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
+		my $filter_cmd = "usearch110 -fastq_filter $outpath/merge_$iter/${$iterations}{$iter}{name}.assembled.fastq -fastaout $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
 		
 		print "Running fastq_filter on file ${$iterations}{$iter}{name} for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
+		print "DEBUG: fastq_filter command:\n$filter_cmd\n" if $debug;
 		my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
-		
-		$filter_log=~ /.*\s(\d*)\s\sFASTQ.*\s(\d*)\s\sLow.*\s(\d*)\s\sConverted.*/s; #regex to extract data
+		print "DEBUG: fastq_filter log:\n$filter_log\n" if $debug;
+		$filter_log=~ /.*\s(\d*)\s\sReads.*\s(\d*)\s\sDiscarded.*\s(\d*)\s\sFiltered.*/s; #regex to extract data
 		my @fqfilter_parse = ($1,$2,$3);
 		foreach my $e (@fqfilter_parse){
 			$e =~ s/,//g;
