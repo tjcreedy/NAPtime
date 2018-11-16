@@ -184,6 +184,40 @@ my @files=@ARGV;
 my %paired_files = find_pairs(@files);
 my $n_file_pairs = keys %paired_files;
 
+#
+#
+#
+#
+#
+#
+#
+# TODO: Add check that all reads have both pairs.
+#
+#
+#
+#
+#
+#
+#
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 print "\nParsing iterations...\n";
 
 print "DEBUG: Input parameters:\n",Dumper \%parameters if $debug;
