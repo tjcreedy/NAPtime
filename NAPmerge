@@ -16,7 +16,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.3.3"; #16/11/2018
+my $version = "0.3.4"; #20/11/2018
 my $help;
 my $outpath;
 my %parameters;
@@ -62,7 +62,7 @@ Arguments:
 	          mode:  One of "run" or "eval", see above. Default "run".
 	          itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
 	    taxon_itsx:  If ITSx is used, the taxon or taxa (according to the ITSx requirements) to filter for. Required if using ITSx.
-	   region_itsx:  If ITSx is used, the region (according to the ITSx requirements) to filter for. Currently, only one region is accepted. Default "ITS2".
+	   region_itsx:  If ITSx is used, the region (according to the ITSx requirements) to filter for. Currently, only one region is accepted, do not list more than one. Default "ITS2".
 	       threads:  Number of CPU threads to use. Default 1.
 	       verbose:  Reports on progress.
 	          help:  Prints out this helpful message.
@@ -144,10 +144,10 @@ if(defhash(\%itsx)){
 		$itsx{taxon} = '.';
 	}
 	if($itsx{region}){
-		my %permitted_regions = map { $_ => 1 } ("SSU","ITS1","5.8S","ITS2","LSU");
+		my %permitted_regions = map { $_ => 1 } ("all", "SSU","ITS1","5.8S","ITS2","LSU");
 		die "Error: please specify a single accepted region for -region_itsx, see \"$script --help\" for more information\n" unless $permitted_regions{$itsx{region}};
 	} else {
-		$itsx{region} = "ITS2";
+		$itsx{region} = "all";
 	}
 }
 
@@ -365,7 +365,8 @@ sub merge_iteration {
 			
 			my $itsx_outfile = "$outpath/itsx_$iter/${$iterations}{$iter}{name}";
 			
-			my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $itsx_outfile -t ${$itsx}{taxon} --save_regions ${$itsx}{region} --preserve T --cpu 1 --graphical F --positions F --not_found F";
+			#my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $itsx_outfile -t ${$itsx}{taxon} --save_regions ${$itsx}{region} --preserve T --cpu 1 --graphical F --positions F --not_found F";
+			my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/filter_$iter/${$iterations}{$iter}{name}.fa -o $itsx_outfile -t ${$itsx}{taxon} --save_regions ${$itsx}{region} --preserve T --cpu 1 --graphical F --positions F –anchor HMM --truncate F --not_found F";
 			print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;
 			system("$itsx_cmd");
 			
