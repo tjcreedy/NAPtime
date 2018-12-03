@@ -18,7 +18,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.5.2"; #07/11/2018
+my $version = "0.5.4"; #26/11/2018
 
 my $help;
 my $outpath;
@@ -156,9 +156,9 @@ if(!defined $outpath){
 if(!$blastpath){
 	my $host = hostname;
 	my %paths = (
-		'ctag' => '/df/blastdb-2018-06-17/nt',
-		'hpc-watson' => '/db/blastdb-2018-02-07/nt',
-		'hpc-crick' => '/db/blastdb-2018-02-07/nt'
+		'ctag' => '/db/db/blastdb-2018-06-17/nt',
+		'hpc-watson' => '/db/blastdb-2018-06-17/nt',
+		'hpc-crick' => '/db/blastdb-2018-06-17/nt'
 	);
 	if(exists($paths{$host})){
 		$blastpath = $paths{$host};
