@@ -522,8 +522,8 @@ sub filter_groups{
 			}
 			
 			if($skipblast){
-				print timestamp(),": $printstring skipping BLAST step and just outputting group $blastg\n" if $verbose;
-				@log{@$loghead} = ("$confidence confidence","$blastg - unBLASTED",$pvalue,$groupspooled,$select_rank,$blasts);
+				print timestamp(),": $printstring skipping BLAST step and just outputting group $select_rank\n" if $verbose;
+				@log{@$loghead} = ("$confidence confidence",$blastg,$pvalue,$groupspooled,$select_rank,$blasts);
 				last;
 			} else {
 				print timestamp(),": $printstring BLASTing with $blastthreads threads for best-guess taxonomy to check against target \"${$specs}{blasttarget}\"\n" if $verbose;
