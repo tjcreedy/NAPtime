@@ -10,10 +10,13 @@ use List::Util qw(sum all any min max);
 use List::MoreUtils qw(pairwise);
 use Algorithm::Loops qw(NestedLoops);
 use POSIX;
-use LWP::Simple;
+#use LWP::Simple;
+use LWP;
 use Parallel::ForkManager;
 use Sys::Hostname;
 use Time::HiRes qw(usleep);
+
+my $browser = LWP::UserAgent->new;
 
 ####Dev####
 use Data::Dumper;
@@ -620,14 +623,17 @@ sub taxonomyblast{
 		my $naccessions = scalar @accessions;
 		print "$naccessions accessions recovered:\n$accessionstring\n" if $debug;
 		if($naccessions>1){
-			my $url  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta";
+			my $url  = "http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta";
 			print "EUTILS url:\n$url\n" if $debug;
-			my $nucdump = get($url) or die "Error: failed to recover taxonomy information for accessions from NCBI";
+#			my $nucdump = get($url) or die "Error: failed to recover taxonomy information for accessions from NCBI";
+			my $url_pull = $browser->get($url);
+			print Dumper $url_pull;
+			my $nucdump = $url_pull->content;
 			print $nucdump;
 			my $taxidstring = join ",",($nucdump =~ /<TSeq_taxid>(.*)<\/TSeq_taxid/g);
 	#		print $taxidstring,"\n";
 			print "Taxids recovered:\n$taxidstring\n" if $debug;
-			my $taxdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
+			my $taxdump = get("http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
 			my @lineages = ($taxdump =~ /<Lineage>(.*)<\/Lineage>/g);
 			printf "%d lineages recovered:\n%s\n", scalar @lineages,join("\n",@lineages) if $debug;
 			my @linaoa;
