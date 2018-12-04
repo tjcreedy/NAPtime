@@ -464,14 +464,14 @@ sub filter_concat{
 			$name =~ s/^(.+)\.[^.]+$/$1/;
 			my $filterfile = "$filterpath$name.fa";
 			push @filteredfiles, $filterfile;
-			my $filter_cmd = "usearch92 -fastq_filter $file -fastaout $filterfile -fastq_maxee $eemax 2>&1 1>/dev/null";
+			my $filter_cmd = "usearch110 -fastq_filter $file -fastaout $filterfile -fastq_maxee $eemax 2>&1 1>/dev/null";
 			#print "Filter command:\n$filter_cmd\n" if $debug;
 			
 			my $filter_log=`$filter_cmd`; #Filter using USEARCH70 fastq_filter, saving terminal output. Note that this function outputs USEARCH70 version information to STDOUT and the actual useful information about filtering to STDERR, hence the redirect of STDERR to STDOUT and discarding of STDOUT
 			$filter_log =~ s/\r/\n/g;
 			#print "Filter log:\n$filter_log\n" if $debug;
 			
-			if($filter_log=~ /.*\s(\d+)\s+Reads.+\s(\d+)\s+Discarded.+\s(\d+)\s+Filtered/s){ #regex to extract data
+			if($filter_log=~ /.*\s(\d*)\s\sReads.*\s(\d*)\s\sDiscarded.*\s(\d*)\s\sFiltered.*/s){ #regex to extract data
 				print $fillog "$name,$1,$2,$3\n";
 				$total_readsin += $1;
 				$total_readsdiscarded += $2;
@@ -620,7 +620,7 @@ sub sort_write_denoise{
 	if($dns eq "yes" and $n_groups_remain > 0){
 		print timestamp(),":$printstring performing unoise\n" if $verbose;
 		
-		my $denoise_cmd = "usearch92 -unoise2 $sortpath -fastaout $denoisepath 2>&1";
+		my $denoise_cmd = "usearch110 -unoise2 $sortpath -fastaout $denoisepath 2>&1";
 		my $denoise_log = `$denoise_cmd`;
 		$denoise_log =~ s/\r/\n/g;
 		print "\nDenoise command:\n$denoise_cmd\nDenoise log:\n$denoise_log\n" if $debug;
