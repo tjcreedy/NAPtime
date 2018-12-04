@@ -18,7 +18,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.5.2"; #07/11/2018
+my $version = "0.5.4"; #26/11/2018
 
 my $help;
 my $outpath;
@@ -137,7 +137,7 @@ if($mode eq "batch" and scalar @files < 2){
 	sleep(3);
 }
 die "Error: sequence length must be specified\n" unless(defined $parameters{seqlength});
-
+die "Error: length variation percentage must be specified\n" unless(defined $parameters{length_var});
 #print Dumper \%parameters;
 
 
@@ -156,9 +156,9 @@ if(!defined $outpath){
 if(!$blastpath){
 	my $host = hostname;
 	my %paths = (
-		'ctag' => '/df/blastdb-2018-06-17/nt',
-		'hpc-watson' => '/db/blastdb-2018-02-07/nt',
-		'hpc-crick' => '/db/blastdb-2018-02-07/nt'
+		'ctag' => '/db/db/blastdb-2018-06-17/nt',
+		'hpc-watson' => '/db/blastdb-2018-06-17/nt',
+		'hpc-crick' => '/db/blastdb-2018-06-17/nt'
 	);
 	if(exists($paths{$host})){
 		$blastpath = $paths{$host};
@@ -620,8 +620,10 @@ sub taxonomyblast{
 		my $naccessions = scalar @accessions;
 		print "$naccessions accessions recovered:\n$accessionstring\n" if $debug;
 		if($naccessions>1){
-	#		print $accessionstring,"\n";
-			my $nucdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta");
+			my $url  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta";
+			print "EUTILS url:\n$url\n" if $debug;
+			my $nucdump = get($url) or die "Error: failed to recover taxonomy information for accessions from NCBI";
+			print $nucdump;
 			my $taxidstring = join ",",($nucdump =~ /<TSeq_taxid>(.*)<\/TSeq_taxid/g);
 	#		print $taxidstring,"\n";
 			print "Taxids recovered:\n$taxidstring\n" if $debug;
