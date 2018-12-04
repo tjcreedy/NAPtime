@@ -28,6 +28,7 @@ my $outpath;
 my %parameters;
 my $mode;
 my $display = "groups";
+our $skipblast;
 our $threads = 1;
 our $blastpath;
 our $verbose;
@@ -64,6 +65,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "threshold_pvalue=f"	=> \$parameters{pvalue_maxthreshold},
 	   "identitypc=s"	=> \$parameters{identity},
 	   "maxgroupscheck=i"	=> \$parameters{maxgroupscheck},
+	   "skipblast"		=> \$skipblast,
 	   "display=s"		=> \$display,
 	   "threads=i"		=> \$threads,
 	   "blastpath=s"	=> \$blastpath,
@@ -143,6 +145,7 @@ die "Error: sequence length must be specified\n" unless(defined $parameters{seql
 die "Error: length variation percentage must be specified\n" unless(defined $parameters{length_var});
 #print Dumper \%parameters;
 
+print "Warning: you have chosen to skip BLASTing during filtering. Cancel now if you've used any BLAST parameter ranges, because you'll run needless iterations.\n" if $skipblast;
 
 
 if(!defined $outpath){
@@ -503,35 +506,44 @@ sub filter_groups{
 				
 			}
 		}
-		
 		if($confidence){
 			
-			# BLAST
-			
 			my $blastg;
+			my $blasts;
+			my $select_rank;
 			if($confidence eq "high"){
 				$blastg = $gids_sorted[0];
+				$blasts = $stat_sorted[0];
+				$select_rank = $gselection;
 			} else {
 				$blastg = $gids_sorted_top;
+				$blasts = $stat_sorted_top;
+				$select_rank = 1;
 			}
 			
-			print timestamp(),": $printstring BLASTing with $blastthreads threads for best-guess taxonomy to check against target \"${$specs}{blasttarget}\"\n" if $verbose;
-			
-			my @blastbestguess = taxonomyblast($groups->{$blastg}{seq},$specs,$blastthreads);
-			my %blast;
-			if(!@blastbestguess){
-				print timestamp(),": $printstring WARNING: could not retrieve a BLAST taxonomy, BLAST likely failed all 5 tries OR only one hit was returned\n";
-			} else {
-				print timestamp(),": $printstring retrieved taxonomy\n" if $verbose;
-				%blast = map { $_ => 1} @blastbestguess;
-			}
-			if(exists($blast{${$specs}{blasttarget}})){
-				@log{@$loghead} = ("$confidence confidence",$gids_sorted[0],$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
-				print timestamp(),": $printstring group $gselection passed BLAST filter, done with $confidence confidence\n" if $verbose;
+			if($skipblast){
+				print timestamp(),": $printstring skipping BLAST step and just outputting group $blastg\n" if $verbose;
+				@log{@$loghead} = ("$confidence confidence","$blastg - unBLASTED",$pvalue,$groupspooled,$select_rank,$blasts);
 				last;
 			} else {
-				print timestamp(),": $printstring group $gselection failed BLAST filter, attempting to move on to other sequences\n" if $verbose;
-				$blastfail = 1;
+				print timestamp(),": $printstring BLASTing with $blastthreads threads for best-guess taxonomy to check against target \"${$specs}{blasttarget}\"\n" if $verbose;
+				
+				my @blastbestguess = taxonomyblast($groups->{$blastg}{seq},$specs,$blastthreads);
+				my %blast;
+				if(!@blastbestguess){
+					print timestamp(),": $printstring WARNING: could not retrieve a BLAST taxonomy, BLAST likely failed all 5 tries OR only one hit was returned\n";
+				} else {
+					print timestamp(),": $printstring retrieved taxonomy\n" if $verbose;
+					%blast = map { $_ => 1} @blastbestguess;
+				}
+				if(exists($blast{${$specs}{blasttarget}})){
+					@log{@$loghead} = ("$confidence confidence",$blastg,$pvalue,$groupspooled,$select_rank,$blasts);
+					print timestamp(),": $printstring group $select_rank passed BLAST filter, done with $confidence confidence\n" if $verbose;
+					last;
+				} else {
+					print timestamp(),": $printstring group $select_rank failed BLAST filter, attempting to move on to other sequences\n" if $verbose;
+					$blastfail = 1;
+				}
 			}
 		
 		}
