@@ -25,7 +25,6 @@ my $outpath;
 my %parameters;
 my %itsx;
 my %primers;
-my $mode = "run";
 our $verbose;
 my $threads = 1;
 our $debug;
@@ -44,30 +43,36 @@ Description:
 		# Filtering - removing poor quality reads 
 		# ITSx filtering - searching for fungal sequences (OPTIONAL)
 		# Read naming - adding the sample name to every read for future clustering and mapping
-	The script can run with each parameter specified with a single value, in which case it outputs a fasta for each pair of fastq files, or if parameter ranges are specified it will loop through every combination of all parameters and output a log table with the results
+	The script can run with each parameter specified with a single value, in which case it outputs a fasta for each pair of fastq files, or if parameter ranges are specified it will loop through every combination of all parameters and outputs a directory containing the fastas for each unique combination of parameters. Either way, a csv log file is output.
+	
+	For more information, see https://github.com/tjcreedy/NAPtime/wiki/NAPmerge
 
 Usage:
 
-	Default mode
-	$script -o <dir> -f <n> -r <n> -p <n> -e <n> [-itsx <path/to/HMMs>] [-t <n>] [-v] <inputfqs>
+	Basic mode
+	$script -output <dir> -forwardprimerl <n> -reverseprimerl <n> -pearquality <n> -eemax <n> [-itsx <path/to/HMMs> -taxon_itsx <tax> -region_itsx <reg> -output_itsx <full>] [-threads <n>] [-verbose] <inputfqs>
 	
-	Evaluation mode
-	$script -o <dir> -f <n> -r <n> -p <n-n,n> -e <n-n,n> --mode eval [-itsx <path/to/HMMs>] [-t <n>] [-v] <inputfqs>
+	Parameter exploration mode
+	$script -output <dir> -forwardprimerl <n> -reverseprimerl <n> -pearquality <n-n,n> -eeemax <n-n,n> [-threads <n>] [-v] <inputfqs>
 
 Arguments:
 
-	       outpath:  Path to a directory in which output files and the log table are written.
-	forwardprimerl:  Number of bases to trim from the forward reads.
-	reverseprimerl:  Number of bases to trim from the reverse reads.
-	   pearquality:  A value or range to pass to PEAR as a -q option.
-	         eemax:  A value or range to pass to USEARCH70 fastq_filter as a -fastq_maxee option
-	          mode:  One of "run" or "eval", see above. Default "run".
-	          itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
-	    taxon_itsx:  If ITSx is used, the taxon or taxa (according to the ITSx requirements) to filter for. Required if using ITSx.
-	   region_itsx:  If ITSx is used, the region (according to the ITSx requirements) to filter for. Currently, only one region is accepted, do not list more than one. Default "ITS2".
-	       threads:  Number of CPU threads to use. Default 1.
-	       verbose:  Reports on progress.
-	          help:  Prints out this helpful message.
+	        outpath:  Path to a directory in which output files and the log table are written.
+	 forwardprimerl:  Number of bases to trim from the forward reads.
+	 reverseprimerl:  Number of bases to trim from the reverse reads.
+	fprimersequence:  A base sequence to trim from the forward reads.
+	rprimersequence:  A base sequence to trim from the reverse reads.
+	    primersfile:  Path to a file containing base sequences to trim - line 1 forward, line 2 reverse.
+	     stricttrim:  Should read pairs not matching one or both primer sequences be discarded?
+	    pearquality:  A value or range to pass to PEAR as a -q option.
+	          eemax:  A value or range to pass to USEARCH110 fastq_filter as a -fastq_maxee option
+	           itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
+	     taxon_itsx:  If ITSx is used, the taxon or taxa (according to the ITSx requirements) to filter for. Required if using ITSx, default "all".
+	    region_itsx:  If ITSx is used, the region (according to the ITSx requirements) to filter for. Currently, only one region is accepted, do not list more than one. Required if using ITSx.
+	    output_itsx:  If ITSx is used, whether to output the complete region ("complete"), complete and partial regions ("partial") or the full sequence ("full") for matching reads. Required if using ITSx.
+	        threads:  Number of CPU threads to use. Default 1.
+	        verbose:  Reports on progress.
+	           help:  Prints out this helpful message.
 
 USAGE
 
@@ -92,13 +97,12 @@ TITLE
 GetOptions("outpath=s"		=> \$outpath,
 	   "forwardprimerl=i"	=> \$primers{length}{forward},
 	   "reverseprimerl=i"	=> \$primers{length}{reverse},
-	   "Fprimersequence=s"	=> \$primers{sequence}{forward},
-	   "Rprimersequence=s"	=> \$primers{sequence}{reverse},
-	   "Primersfile=s"	=> \$primers{sequence}{file},
+	   "fprimersequence=s"	=> \$primers{sequence}{forward},
+	   "rprimersequence=s"	=> \$primers{sequence}{reverse},
+	   "primersfile=s"	=> \$primers{sequence}{file},
 	   "stricttrim"		=> \$primers{sequence}{strict},
 	   "pearquality=s"	=> \$parameters{pearquality},
 	   "eemax=s"		=> \$parameters{eemax},
-	   "mode=s"		=> \$mode,
 	   "noconvert"		=> \$parameters{noconvert},
 	   "itsx=s"		=> \$itsx{path},
 	   "taxon_itsx=s"	=> \$itsx{taxon},
@@ -163,7 +167,7 @@ if(defhash(\%{$primers{length}})){
 
 # CHECK MERGING
 
-my $mergetool = "PEAR";
+my $mergetool = "pear";
 die "Error: $mergetool not found, is it installed and in the PATH?\n" if(! which $mergetool);
 
 die "Error: please specify --pearquality, see \"$script --help\" for more information\n" if(!defined $parameters{pearquality});
@@ -192,13 +196,12 @@ print "DEBUG: itsx hash:\n",Dumper\%itsx if $debug;
 
 if(defhash(\%itsx)){
 	die "Error: you must specify a path to HMMs using -itsx if you wish to use ITSx, see \"$script --help\" for more information\n" unless $itsx{path};
-	die "Error: the path to HMMs that you have specified does not exist\n" unless -e $itsx{path};
-	die "Error: ITSx not found, is it installed and in the PATH?\n" if(! which "ITSx");	
+	die "Error: the path to HMMs that you have specified does not exist\n" unless (-e $itsx{path});
+	die "Error: ITSx not found, is it installed and in the PATH?\n" if(! which "ITSx");
 	
 	# Set defaults
 	
 	$itsx{taxon}  = '.'           if( !$itsx{taxon}  );
-	$itsx{region} = "all"         if( !$itsx{region} );
 	$itsx{output} = $itsx{region} if( !$itsx{output} );
 	
 	# Check region is acceptable
@@ -206,7 +209,7 @@ if(defhash(\%itsx)){
 	die "Error: please specify a single accepted region (not 'all' or 'none') for -region_itsx, see \"$script --help\" for more information\n" unless $permitted_regions{$itsx{region}};
 	
 	# Check output is acceptable
-	my %permitted_outputs = map { $_ => 1 } ("full", "partial", "trimmed");
+	my %permitted_outputs = map { $_ => 1 } ("full", "partial", "complete");
 	die "Error: please specify an acceptable output choice for -output_itsx, see \"$script --help\" for more information\n" unless $permitted_outputs{$itsx{output}};
 }
 
@@ -239,7 +242,7 @@ my $iterations = parse_parameters(\%parameters,sort keys %paired_files);
 
 print "DEBUG: Parsed iterations:\n", Dumper $iterations if $debug;
 
-printf "I will be running %d iterations on %d file pairs", scalar keys %$iterations, scalar keys %paired_files;
+printf "\n$script will run %d iterations on each of %d file pairs\n", scalar keys %$iterations, scalar keys %paired_files;
 
 
 ######################################################
@@ -259,14 +262,14 @@ my %trim_log;
 $tpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$done_trims++;
-	printf "Completed trimming $done_trims/%d file pairs\r", scalar keys %paired_files if $verbose;
+	printf "Completed trimming $done_trims/%d file pairs\r", scalar keys %paired_files;
 	my $name = $data_structure_reference->{name};
 	$trim_log{$name} = $data_structure_reference->{result};
 });
 
 # DO TRIMMING
 
-printf "Trimming %d file pairs using $threads threads\n", scalar keys %paired_files if $verbose;
+printf "\nTrimming %d file pairs using $threads threads\n", scalar keys %paired_files if $verbose;
 
 foreach my $name (keys %paired_files){
 	my $pid = $tpm->start and next;
@@ -280,6 +283,7 @@ foreach my $name (keys %paired_files){
 
 $tpm->wait_all_children;
 print "\n";
+print "DEBUG: trim log:\n", Dumper \%trim_log, "\n" if $debug;
 
 ######################################################
 # RUN MERGING AND FILTERING
@@ -290,13 +294,16 @@ print "\n";
 my $mpm = Parallel::ForkManager->new($threads);
 my $done_iterations=0;
 my %merge_log;
+my $total =  (scalar keys %$iterations) * (scalar keys %paired_files);
+my $it_threads = $threads/$total;
+$it_threads = 1 if($it_threads < 1);
 
 # SET UP COMPLETION CLEANER
 
 $mpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$done_iterations++;
-	printf "Completed $done_iterations/%d iterations\r", scalar keys %$iterations if $verbose;
+	print "Completed $done_iterations/$total merging and filtering iterations\r";
 	my $iter = $data_structure_reference->{iter};
 	my $name = $data_structure_reference->{name};
 	$merge_log{$iter}{$name} = $data_structure_reference->{result};
@@ -304,16 +311,16 @@ $mpm->run_on_finish( sub {
 
 # DO MERGING
 
-printf "Starting %d merging iterations using $threads threads\n", scalar keys %$iterations if $verbose;
+printf "\nStarting %d merging iterations using $threads threads\n", scalar keys %$iterations if $verbose;
 
 foreach my $iter (keys %$iterations){
 	make_path("$outpath/merge_$iter","$outpath/filter_$iter");
 	foreach my $name (keys %paired_files){
 		my $pid = $mpm->start and next;
 		
-		my $out = merge_iteration($mergetool,$filtertool,$iterations,$iter,$name,$outpath);
+		my $out = merge_iteration($mergetool,$filtertool,$iterations,$iter,$name,$outpath,$it_threads);
 		
-		$mpm->finish(0, {result => $out, iteration => $iter, name => $name});
+		$mpm->finish(0, {result => $out, iter => $iter, name => $name});
 	}
 }
 
@@ -322,6 +329,7 @@ foreach my $iter (keys %$iterations){
 $mpm->wait_all_children;
 print "\n";
 remove_tree("$outpath/trim") unless $debug;
+print "DEBUG: merge log:\n", Dumper \%merge_log, "\n" if $debug;
 
 ######################################################
 # RUN ITSx
@@ -330,6 +338,7 @@ remove_tree("$outpath/trim") unless $debug;
 my $itsx_log;
 
 if(defhash(\%itsx)){
+	print "\nFinding unique reads, running ITSx and filtering\n" if($debug or !$verbose);
 	
 	# RUN SUBROUTINE
 	$itsx_log = run_itsx($outpath, $iterations, \%paired_files, \%itsx)
@@ -351,6 +360,7 @@ if(defhash(\%itsx)){
 	}
 }
 
+print "DEBUG: itsx log:\n", Dumper $itsx_log, "\n" if $debug;
 
 ######################################################
 # DO LOG OUTPUT
@@ -360,7 +370,7 @@ if(defhash(\%itsx)){
 #Do logging
 open my $log, '>', "$outpath/merge.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
 
-print $log join(',',('readname' , 'iteration' ,'Input_reads','Pairs_untrimmed_removed', 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted','ITSx detected')),"\n";
+print $log join(',',('readname' , 'iteration' ,'Input_reads','Pairs_untrimmed_removed', 'pearquality' , 'pcA' , 'pcC' , 'pcG' , 'pcT' , 'uncalled_bases' , 'PEAR_total_reads' , 'PEAR_merged_reads' , 'PEAR_discarded_reads' , 'PEAR_not_merged_reads' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted','ITSx_detected')),"\n";
 
 foreach my $iter (sort keys %$iterations){
 	foreach my $name (sort keys %paired_files){
@@ -370,7 +380,7 @@ foreach my $iter (sort keys %$iterations){
 
 close $log;
 
-print "CSV log of read processing written\n" if($verbose);
+print "\nDone: CSV log of read processing written\n";
 
 exit;
 
@@ -414,7 +424,7 @@ sub trim {
 
 sub merge_iteration {
 	# Load variables
-	my ($mergetool, $filtertool, $iterations, $iter, $name, $outpath) = @_;
+	my ($mergetool, $filtertool, $iterations, $iter, $name, $outpath, $it_threads) = @_;
 	
 	# Start log line
 	my $log = ${$iterations}{$iter}{pearquality};
@@ -424,7 +434,7 @@ sub merge_iteration {
 	print "Running $mergetool on file $name for iteration $iter with quality threshold ${$iterations}{$iter}{pearquality}\n" if $verbose;
 	
 	# Create command
-	my $merge_cmd = "$mergetool -f $outpath/trim/$name\_R1.fq -r $outpath/trim/$name\_R2.fq -o $outpath/merge_$iter/$name -q ${$iterations}{$iter}{pearquality} 2>/dev/null";
+	my $merge_cmd = "$mergetool -f $outpath/trim/$name\_R1.fq -r $outpath/trim/$name\_R2.fq -o $outpath/merge_$iter/$name -q ${$iterations}{$iter}{pearquality} -j $it_threads 2>/dev/null";
 	
 	# Run command
 	print "DEBUG: $mergetool command:\n$merge_cmd\n" if $debug;
@@ -466,7 +476,7 @@ sub merge_iteration {
 		$log .= ",${$iterations}{$iter}{eemax}";
 		
 		# Create command
-		my $filter_cmd = "$filtertool -fastq_filter $outpath/merge_$iter/$name.assembled.fastq -fastaout $outpath/filter_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} 2>&1 1>/dev/null";
+		my $filter_cmd = "$filtertool -fastq_filter $outpath/merge_$iter/$name.assembled.fastq -fastaout $outpath/filter_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
 		
 		# Run command
 		print "DEBUG: fastq_filter command:\n$filter_cmd\n" if $debug;
@@ -508,19 +518,21 @@ sub run_itsx{
 	
 	# Work through all input sequences and find uniques
 	
-	print "Finding unique sequences in preparation for running ITSx\n" if $verbose;
+	print "\nFinding unique sequences in preparation for running ITSx\n" if $verbose;
 	
 	my %uniqueseqs;
 	foreach my $iter (keys %$iterations){
 		foreach my $name (keys %paired_files){
 			# Read fasta
 			my ($fasta, $lines) = read_fasta("$outpath/rename_$iter/$name.fa");
-			write_fasta("$outpath/rename_$iter/$name.fa") if($lines > scalar keys %$fasta); # Write unwrapped if wrapped
-			
+			write_fasta($fasta, "$outpath/rename_$iter/$name.fa") if($lines > scalar keys %$fasta); # Write unwrapped if wrapped
+			printf "DEBUG: $name.fa has %d sequences\n", scalar keys %$fasta if $debug;
 			# Add to unique hash
 			@uniqueseqs{(values %$fasta)} = ();
 		}
 	}
+	
+	printf "DEBUG: read %d unique sequences\n", scalar keys %uniqueseqs if $debug;
 	
 	# Give each unique sequence a name
 	@uniqueseqs{(keys %uniqueseqs)} = map { "seq".$_ } (1..scalar keys %uniqueseqs);
@@ -537,20 +549,23 @@ sub run_itsx{
 	print "Running ITSx\n" if $verbose;
 	
 	# Create command
-	my $itsx_cmd = "ITSx -p $itsx{path} -i $outpath/itsx/derep.fa -o $outpath/itsx/output -t $itsx{taxon} --save_regions $itsx{region} --preserve T --cpu $threads --graphical F --positions F --not_found F --truncate F --partial 1";
+	my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/itsx/derep.fa -o $outpath/itsx/output -t ${$itsx}{taxon} --save_regions ${$itsx}{region} --preserve T --cpu $threads --graphical F --positions F --not_found F --truncate F --partial 1 >/dev/null 2>&1";
 	
 	# Run command
 	print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;
 	system("$itsx_cmd");
 	
 	# Set up which output file to use and read in
-	my $itsxoutpath = "$outpath/itsx/output.$itsx{region}";
-	$itsxoutpath .= "full_and_partial" if($itsx{output} eq "partial");
+	my $itsxoutpath = "$outpath/itsx/output.${$itsx}{region}";
+	$itsxoutpath .= "full_and_partial" if(${$itsx}{output} eq "partial" or ${$itsx}{output} eq "full");
 	$itsxoutpath .= ".fasta";
 	
 	my ($itsseqs, $lines) = read_fasta("$itsxoutpath");
+	printf "DEBUG: selected ITSx output file has %d sequences\n", scalar keys %$itsseqs if $debug;
 	
 	# FILTER INPUT FILES
+	
+	print "ITSx complete, using outputs to filter your files\n" if $verbose;
 	
 	# Work through all input sequences and output those selected by ITSx
 	foreach my $iter (keys %$iterations){
@@ -563,7 +578,7 @@ sub run_itsx{
 		# Loop through files for each iteration
 		foreach my $name (keys %$paired_files){
 			open my $fi, '<', "$outpath/rename_$iter/$name.fa" or die "Error: can't open $outpath/rename_$iter/$name.fa for reading\n";
-			open my $fo, '>', "$outpath/itsx_$iter/$name.fa" or die "Error: can't open $outdir/$name.fa for writing\n";
+			open my $fo, '>', "$outdir/$name.fa" or die "Error: can't open $outdir/$name.fa for writing\n";
 			
 			my $head;
 			my $nseqs_passed;
@@ -571,11 +586,11 @@ sub run_itsx{
 			while(my $line = <$fi>){
 				chomp $line;
 				if($line =~ /^>/){
-					$line = $head;
+					$head = $line;
 				} elsif(${$itsseqs}{$uniqueseqs{$line}}){ # Is the seqX header ($uniqueseqs{$line}) for this unique sequence ( $line ) in the headers of the ITSx output (keys %itsseqs)?
 					$nseqs_passed++;
 					
-					if($itsx{output} eq "full"){
+					if(${$itsx}{output} eq "full"){
 						print $fo "$head\n$line\n";
 					} else {
 						print $fo "$head\n${$itsseqs}{$uniqueseqs{$line}}\n";
@@ -593,6 +608,8 @@ sub run_itsx{
 	}
 	
 	remove_tree("$outpath/itsx") if !$debug;
+	
+	print "Completed ITSx filter\n" if $verbose;
 	
 	return \%itsx_log;
 }
@@ -632,8 +649,8 @@ sub parse_parameters {
 	my ($inparams,@names) = @_;
 	my @itarray;
 	my @paramarray;
-	push @paramarray, "name";
-	push @itarray, \@names;
+#	push @paramarray, "name";
+#	push @itarray, \@names;
 	foreach my $param (keys %$inparams){
 		push @paramarray, $param;
 		if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
