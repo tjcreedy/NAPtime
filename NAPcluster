@@ -154,7 +154,7 @@ $blastparams{blastthreads} = $threads;
 # Set defaults
 $mode = "batch" unless(defined $mode);
 my %paramdefaults = (
-	'usearch_version'	=> 80,
+	'usearch_version'	=> 81,
 	'filter_chimeras'	=> 'no',
 	'denoise'		=> 'yes',
 	'eemax'			=> 'NA',
@@ -771,10 +771,10 @@ sub cluster_and_map{
 		my $mapcmd;
 		if(${$iterations}{$iter}{cpv} == 0){
 	#		$idpc=0.999;
-			$mapcmd = "usearch80 -search_exact $allreads_raw -db $otuspath -strand plus -uc $ucpath -threads 1 2>&1"
+			$mapcmd = "usearch81 -search_exact $allreads_raw -db $otuspath -strand plus -uc $ucpath -threads 1 2>&1"
 		} else {
 			$idpc=1-(${$iterations}{$iter}{cpv}/100);
-			$mapcmd = "usearch80 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath -threads 1 2>&1";
+			$mapcmd = "usearch81 -usearch_global $allreads_raw -db $otuspath -strand plus -id $idpc -uc $ucpath -threads 1 2>&1";
 		}
 		print timestamp(),":$printstring starting mapping all reads to OTUs using",$idpc ? " id $idpc\n" : " exact matches only\n" if $verbose;
 
