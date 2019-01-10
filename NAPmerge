@@ -557,7 +557,7 @@ sub run_itsx{
 	
 	# Set up which output file to use and read in
 	my $itsxoutpath = "$outpath/itsx/output.${$itsx}{region}";
-	$itsxoutpath .= "full_and_partial" if(${$itsx}{output} eq "partial" or ${$itsx}{output} eq "full");
+	$itsxoutpath .= ".full_and_partial" if(${$itsx}{output} eq "partial" or ${$itsx}{output} eq "full");
 	$itsxoutpath .= ".fasta";
 	
 	my ($itsseqs, $lines) = read_fasta("$itsxoutpath");
