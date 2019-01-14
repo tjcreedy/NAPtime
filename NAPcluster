@@ -797,7 +797,7 @@ sub cluster_and_map{
 				print timestamp(),":$printstring starting mapping iteration $it using lines $linemin to $linemax of $allreads_raw in temporary file $tempin\n" if $verbose;
 				my $subcmd = "sed -n $linemin,$linemax"."p $allreads_raw > $tempin";
 				system("$subcmd");
-				my $map_cmd = "usearch80 -usearch_global $tempin -db $otuspath -strand plus -id $idpc -uc $tempout 2>&1";
+				my $map_cmd = "usearch81 -usearch_global $tempin -db $otuspath -strand plus -id $idpc -uc $tempout 2>&1";
 				print "Command: $map_cmd\n" if $debug;
 				my $maplog = `$map_cmd`;
 				print "Log:\n$maplog\n" if $debug;
