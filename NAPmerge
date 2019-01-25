@@ -12,14 +12,14 @@ use List::Util qw(all any max);
 use Algorithm::Loops qw(NestedLoops);
 use Parallel::ForkManager;
 use Time::HiRes qw(usleep);
-
+use Cwd qw(cwd);
 use Data::Dumper;
 
 ########################################################
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.4.1"; #08/01/2019
+my $version = "0.4.2"; #25/01/2019
 my $help;
 my $outpath;
 my %parameters;
@@ -194,7 +194,10 @@ if(!$parameters{noconvert}){
 
 print "DEBUG: itsx hash:\n",Dumper\%itsx if $debug;
 
+
 if($itsx{path} or $itsx{taxon} or $itsx{region} or $itsx{output}){
+	my $curdir = cwd();
+	die "Error: you do not have permission to write to the current directory, this will cause ITSx to fail\n" unless -w $curdir;
 	die "Error: you must specify a path to HMMs using -itsx if you wish to use ITSx, see \"$script --help\" for more information\n" unless $itsx{path};
 	die "Error: the path to HMMs that you have specified does not exist\n" unless (-e $itsx{path});
 	die "Error: ITSx not found, is it installed and in the PATH?\n" if(! which "ITSx");
@@ -554,6 +557,7 @@ sub run_itsx{
 	# Run command
 	print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;
 	my $itsx_term = `$itsx_cmd`;
+	print "DEBUG: ITSx terminal:\n$itsx_term\n" if $debug;
 	
 	# Set up which output file to use and read in
 	my $itsxoutpath = "$outpath/itsx/output.${$itsx}{region}";
