@@ -19,7 +19,7 @@ use Data::Dumper;
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.4.0"; #15/21/2018
+my $version = "0.4.1"; #08/01/2019
 my $help;
 my $outpath;
 my %parameters;
@@ -194,7 +194,7 @@ if(!$parameters{noconvert}){
 
 print "DEBUG: itsx hash:\n",Dumper\%itsx if $debug;
 
-if(defhash(\%itsx)){
+if($itsx{path} or $itsx{taxon} or $itsx{region} or $itsx{output}){
 	die "Error: you must specify a path to HMMs using -itsx if you wish to use ITSx, see \"$script --help\" for more information\n" unless $itsx{path};
 	die "Error: the path to HMMs that you have specified does not exist\n" unless (-e $itsx{path});
 	die "Error: ITSx not found, is it installed and in the PATH?\n" if(! which "ITSx");
@@ -557,11 +557,11 @@ sub run_itsx{
 	
 	# Set up which output file to use and read in
 	my $itsxoutpath = "$outpath/itsx/output.${$itsx}{region}";
-	$itsxoutpath .= "full_and_partial" if(${$itsx}{output} eq "partial" or ${$itsx}{output} eq "full");
+	$itsxoutpath .= ".full_and_partial" if(${$itsx}{output} eq "partial" or ${$itsx}{output} eq "full");
 	$itsxoutpath .= ".fasta";
 	
 	my ($itsseqs, $lines) = read_fasta("$itsxoutpath");
-	printf "DEBUG: selected ITSx output file has %d sequences\n", scalar keys %$itsseqs if $debug;
+	printf "DEBUG: selected ITSx output file $itsxoutpath has %d sequences\n", scalar keys %$itsseqs if $debug;
 	
 	# FILTER INPUT FILES
 	
