@@ -549,11 +549,11 @@ sub run_itsx{
 	print "Running ITSx\n" if $verbose;
 	
 	# Create command
-	my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/itsx/derep.fa -o $outpath/itsx/output -t ${$itsx}{taxon} --save_regions ${$itsx}{region} --preserve T --cpu $threads --graphical F --positions F --not_found F --truncate F --partial 1 >/dev/null 2>&1";
+	my $itsx_cmd = "ITSx -p ${$itsx}{path} -i $outpath/itsx/derep.fa -o $outpath/itsx/output -t ${$itsx}{taxon} --save_regions ${$itsx}{region} --preserve T --cpu $threads --graphical F --positions F --not_found F --truncate F --partial 1 2>&1";
 	
 	# Run command
 	print "DEBUG: ITSx command:\n$itsx_cmd\n" if $debug;
-	system("$itsx_cmd");
+	my $itsx_term = `$itsx_cmd`;
 	
 	# Set up which output file to use and read in
 	my $itsxoutpath = "$outpath/itsx/output.${$itsx}{region}";
