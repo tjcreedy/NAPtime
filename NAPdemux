@@ -58,7 +58,7 @@ USAGE
 #
 ######################################################
 
-GetOptions("table=s{1,0}"	=> \@tables_paths,
+GetOptions("table=s{1,}"	=> \@tables_paths,
 	   "convert=s"		=> \$convert,
 	   "columns=s"		=> \$columns,
 	   "errortolerance=s"	=> \$errortolerance,
