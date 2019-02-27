@@ -11,7 +11,7 @@ use Time::HiRes qw(usleep);
 ####Dev####
 use Data::Dumper;
 
-my $version = "0.1.4"; #07/11/2018
+my $version = "0.1.5"; #27/02/2019
 
 my $help;
 my @tables_paths;
@@ -39,11 +39,11 @@ Description:
 
 Usage:
 
-	$script --table <table1.txt> [--columns 1,2,4] --output <dir> [--wipe] [--pairs <option>] [-e <n>] [--table <table2.txt>] [--convert <ctable.csv] <for_a1.fq> <rev_a1.fq> <for_a2.fq> <rev_a2.fq>
+	$script -table <table1.txt> [-columns 1,2,4] -output <dir> [-wipe] [-pairs <option>] [-e <n>] [-table <table2.txt>] [-convert <ctable.csv] <for_a1.fq> <rev_a1.fq> <for_a2.fq> <rev_a2.fq>
 
 Arguments:
 
-	  table: The file path of a tab delimited table detailing barcode sequences and sample names, see above. Each table requires a separate --table argument.
+	  table: The file path of a tab delimited table detailing barcode sequences and sample names, see above. Multiple tables can be listed after the -table argument and will be treated as one large table, but they must all have the same column structure.
 	columns: The column numbers, separated by commas, of the sample names, forward barcode sequence, reverse barcode sequence, and well ID, respectively. The numbers must be in this order, but the well ID is optional. Default: 1,2,3
 	outpath: The path to a directory in which place output files. Directories will be created if they do not exist.
 	   wipe: Remove all files in the output directory if it already exists. Will not do anything if the output directory doesn't exist.
@@ -58,7 +58,7 @@ USAGE
 #
 ######################################################
 
-GetOptions("table=s"		=> \@tables_paths,
+GetOptions("table=s{1,0}"	=> \@tables_paths,
 	   "convert=s"		=> \$convert,
 	   "columns=s"		=> \$columns,
 	   "errortolerance=s"	=> \$errortolerance,
