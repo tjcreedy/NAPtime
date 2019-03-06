@@ -6,46 +6,25 @@ use strict;
 use Getopt::Long;
 use File::Basename;
 use File::Path qw(make_path remove_tree);
-use File::Which;
 use List::Util qw(sum all any min max); 
 use List::MoreUtils qw(pairwise);
 use Algorithm::Loops qw(NestedLoops);
 use POSIX;
 use LWP::Simple;
-#use LWP;
 use Parallel::ForkManager;
 use Sys::Hostname;
 use Time::HiRes qw(usleep);
+
+####Dev####
 use Data::Dumper;
 
+my $version = "0.5.4"; #26/11/2018
 
-########################################################
-# INITIALISE VARIABLES AND SET DEFAULTS
-#
-
-my $version = "0.7.0"; #05/03/2019
 my $help;
 my $outpath;
-my %parameters = (
-	minsize			=> 2,
-	bootstraps		=> 10000,
-	blasthits		=> 100,
-	blastthreshold		=> 0.2,
-	pvalue			=> 0,
-	pvalue_maxthreshold	=> 0.5,
-	identity		=> 0.99,
-	maxgroupscheck		=> 10,
-	var_by_codon		=> 'x',
-	pc_var			=> 'NA',
-	base_var		=> 'NA',
-	codon_var		=> 'NA',
-	minlength		=> 'NA',
-	maxlength		=> 'NA',
-);
-
-#my $display = "groups";
-#my $browser = LWP::UserAgent->new;
-our $blastskip;
+my %parameters;
+my $mode;
+my $display = "groups";
 our $threads = 1;
 our $blastpath;
 our $verbose;
@@ -53,8 +32,9 @@ our $debug;
 
 my $script = basename($0,());
 
-# CREATE HELPFILE
-
+########################################################
+# USAGE
+#
 my $usage =<<USAGE;
 
 Description:
@@ -64,9 +44,33 @@ Description:
 	For more details, see the github wiki at https://github.com/tjcreedy/NAPtime/wiki/NAPselect.
 	
 USAGE
+#
+######################################################
 
-# SET UP HEADER
+GetOptions("output=s"		=> \$outpath,
+	   "mode=s"		=> \$mode,
+	   "seqlength=i"	=> \$parameters{seqlength},
+	   "length_var=s"	=> \$parameters{length_var},
+	   "nest"		=> \$parameters{nest},
+	   "minsize=s"		=> \$parameters{minsize},
+	   "bootstraps=s"	=> \$parameters{bootstraps},
+	   "blasthits=s"	=> \$parameters{blasthits},
+	   "blasttarget=s"	=> \$parameters{blasttarget},
+	   "blastthreshold=s"	=> \$parameters{blastthreshold},
+	   "pvalue=s"		=> \$parameters{pvalue},
+	   "threshold_pvalue=f"	=> \$parameters{pvalue_maxthreshold},
+	   "identitypc=s"	=> \$parameters{identity},
+	   "maxgroupscheck=i"	=> \$parameters{maxgroupscheck},
+	   "display=s"		=> \$display,
+	   "threads=i"		=> \$threads,
+	   "blastpath=s"	=> \$blastpath,
+	   "verbose"		=> \$verbose,
+	   "debug"		=> \$debug,
+	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
+########################################################
+# HEADER
+#
 my $timedate = timestamp()." ".datestamp();
 my $timer = "100000";
 my $title =<<TITLE;
@@ -77,37 +81,6 @@ my $title =<<TITLE;
  | |\\  |/ ____ \\| |    | |_| | | | | | |  __/ 
  |_| \\_/_/    \\_\\_|     \\__|_|_| |_| |_|\\___| 
 TITLE
-
-######################################################
-# GET INPUTS AND PARSE
-#
-
-GetOptions("output=s"		=> \$outpath,
-	   "seqlength=i"	=> \$parameters{seqlength},
-	   "pc_var=s"		=> \$parameters{pc_var},
-	   "base_var=s"		=> \$parameters{base_var},
-	   "codon_var=s"	=> \$parameters{codon_var},
-	   "minlength=s"	=> \$parameters{minlength},
-	   "maxlength=s"	=> \$parameters{maxlength},
-	   "var_by_codon:s"	=> \$parameters{var_by_codon},
-	   "minsize=s"		=> \$parameters{minsize},
-	   "bootstraps=s"	=> \$parameters{bootstraps},
-	   "blasthits=s"	=> \$parameters{blasthits},
-	   "blasttarget=s"	=> \$parameters{blasttarget},
-	   "blastthreshold=s"	=> \$parameters{blastthreshold},
-	   "pvalue=s"		=> \$parameters{pvalue},
-	   "threshold_pvalue=f"	=> \$parameters{pvalue_maxthreshold},
-	   "identitypc=s"	=> \$parameters{identity},
-	   "maxgroupscheck=i"	=> \$parameters{maxgroupscheck},
-	   "skipblast"		=> \$blastskip,
-	   "threads=i"		=> \$threads,
-	   "blastpath=s"	=> \$blastpath,
-	   "verbose"		=> \$verbose,
-	   "debug"		=> \$debug,
-	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
-
-# RUN HEADER
-
 foreach my $line (split '\n',$title){
 	print $line,"\n";
 	usleep($timer);
@@ -117,16 +90,10 @@ print "\nWelcome. This is $script version $version, started at $timedate.\n";
 
 print "$usage\n" and exit if($help);
 
-if($debug){
-	$verbose = 1;
-	print "\n#### Running in debug mode ####\n\n";
-	$parameters{bootstraps} = 10;
-	print "Debug mode has reset the number of bootstraps to 10\n";
-}
+print "\nChecking your inputs...\n";
 
-print "\nChecking your parameters...\n" if $verbose;
-
-# CHECK FOR INPUT FILES
+$verbose = 1 if $debug;
+print "\n#### Running in debug mode ####\n\n" if $debug;
 
 if(scalar @ARGV == 0){
 	if($debug){
@@ -136,212 +103,176 @@ if(scalar @ARGV == 0){
 	}
 }
 
+#
+#
+########################################################
 my @files=@ARGV;
 
-# CHECK LENGTH FILTERING
+#print Dumper \%parameters;
 
-die "Error: sequence length must be specified\n" unless $parameters{seqlength};
+my %paramdefaults = (
+	'nest'			=> 0,
+	'minsize'		=> 2,
+	'bootstraps'		=> 10000,
+	'blasthits'		=> 100,
+	'blastthreshold'	=> 0.2,
+	'pvalue'		=> 0,
+	'pvalue_maxthreshold'	=> 0.5,
+	'identity'		=> 0.99,
+	'maxgroupscheck'	=> 10
+);
 
-# CHECK BLAST
+$paramdefaults{bootstraps} = 10 if $debug;
+print "Debug mode has reset the number of bootstraps to 10\n" if $debug;
 
-my $customdb;
-my $blastthreads = 1;
-if($blastskip){
-	die "Error: path to BLAST database or BLAST target specified, but you have select to skip BLASTing\n" if($blastpath or $parameters{blasttarget});
-	print "You have chosen to skip BLASTing during filtering. NAPselect will not be as efficient (but will be faster!)\n" if $blastskip;
-	@parameters{('blasthits','blastthreshold')} = (0, 0);
-} else {
-	# Check for BLAST installation
-	die "Error: blastn could not be found, is it installed and in the PATH?\n" if(! which "blastn");
-	
-	# Set up BLASTdb
-	if(! $blastpath){
-		my $host = hostname;
-		my %paths = (
-			'ctag' => '/db/db/blastdb-2018-06-17/nt',
-			'hpc-watson' => '/db/blastdb-2018-06-17/nt',
-			'hpc-crick' => '/db/blastdb-2018-06-17/nt'
-		);
-		if(exists($paths{$host})){
-			$blastpath = $paths{$host};
-		} else {
-			die "Error: no path to BLAST database found, please give me one using --blastpath <path>\n";
-		}
-	}
-	
-	# Check type of BLASTdb
-	my $blastdbinfo = `blastdbcmd -db $blastpath -info`;
-	my $blastdbname = ($blastdbinfo =~ /^Database: (.+)$/ )[0];
-	if($blastdbname eq "Nucleotide collection (nt)"){
-		die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
-		print "Using Genbank $blastdbname database for taxonomic identification of sequences\n" if $verbose;
-	} else {
-		die "Error: custom blast database selected but BLAST target specified, custom databases cannot be parsed for taxonomy information\n	(If this is in error, let Thomas know)\n" if $parameters{blasttarget};
-		print "Using custom blast database $blastdbname, taxonomic identification will not be performed and sequences will be selected based on hit rate to $blastdbname\n" if $verbose;
-		$customdb = 1;
-		$parameters{blasttarget} = 0;
-	}
-	
-	#Set BLAST threads
-	$blastthreads = floor($threads /scalar @files) if(scalar @files < $threads)
+#print Dumper \%paramdefaults;
+my @params = ('seqlength','length_var','nest','minsize','bootstraps','blasthits','blasttarget',
+		'pvalue','blastthreshold','pvalue_maxthreshold','identity','maxgroupscheck');
+
+$mode = "stat" unless(defined $mode);
+die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
+@parameters{@params} = map { defined $parameters{$_} ? $parameters{$_} : $paramdefaults{$_} } (@params);
+if($mode eq "batch" and scalar @files < 2){
+	print "\nWARNING: Mode is \"batch\" but you've only given me one file. Did you mean \"--mode stat\"? Running anyway...\n\n" ;
+	sleep(3);
 }
+die "Error: sequence length must be specified\n" unless(defined $parameters{seqlength});
 
-# CHECK OUTPUT DIRECTORY
+#print Dumper \%parameters;
 
-my $pathroot;
+
 
 if(!defined $outpath){
 	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
 } else {
-	print "Creating output directory if needed\n" if $verbose;
+	print "Creating output directory if needed\n";
+	make_path($outpath);
 	$outpath =~ s/\/$//;
-	$pathroot = "$outpath/temp/";
-	make_path($pathroot);
 }
 
-# CHECK BOOLEAN INPUTS
-
-foreach my $par ('filter_chimeras', 'denoise', 'var_by_codon'){
-	$parameters{$par} = 1 if !$parameters{$par};
-	$parameters{$par} = 0 if $parameters{$par} eq 'x';
-}
-
-######################################################
-# SET UP ITERATIONS
 #
-
-print "\nParsing iterations...\n" if $verbose;
-
-print "DEBUG: Input parameters:\n",Dumper \%parameters if $debug;
-
-my ($iterations, $expand_parameters, $removed) = parse_parameters(\%parameters);
-
-my $anyremoved;
-$anyremoved = 1 if exists(${$removed}{red}) or exists(${$removed}{lerr});
-
-print "DEBUG: expanded parameter arrays hash follows:\n", Dumper $expand_parameters if $debug;
-
-print "DEBUG: parsed iteration hash follows:\n", Dumper $iterations if $debug;
-
-print "DEBUG: removed hash follows:\n", Dumper $removed if $debug and $anyremoved;
-
-# SECOND INPUT PARSE
-
-my $batch = sum ( map { scalar @{${$expand_parameters}{$_}} } keys %$expand_parameters );
-$batch = $batch / scalar keys %$expand_parameters;
-
-print "DEBUG: batch value is $batch\n" if $debug;
-
-if(scalar keys %$iterations == 0){
-	if(exists(${$removed}{lerr})){
-		die "Error: please use only one of -pc_var, -base_var or -codon_var, or one or both of -minlength and -maxlength\n" if $batch == 1;
-		die "Error: all supplied length specification combinations were incompatible. You should add 'NA' to some or all of the ranges for the length specification combinations\n" if $batch > 1;
+# Check for blast database and arrange threads
+#
+if(!$blastpath){
+	my $host = hostname;
+	my %paths = (
+		'ctag' => '/db/db/blastdb-2018-06-17/nt',
+		'hpc-watson' => '/db/blastdb-2018-06-17/nt',
+		'hpc-crick' => '/db/blastdb-2018-06-17/nt'
+	);
+	if(exists($paths{$host})){
+		$blastpath = $paths{$host};
 	} else {
-	die "Error: only incompatible specifications remain. Check your inputs\n";
+		die "Error: no path to BLAST database found, please give me one using --blastpath <path>\n";
 	}
 }
+my $blastthreads = 1;
+if($mode eq "stat"){
+	$blastthreads = $threads;
+} elsif(scalar @files < $threads){
+	$blastthreads = floor($threads /scalar @files);
+}
 
-printf "Parsed inputs generated %d iterations %s\n", scalar keys %$iterations, $anyremoved ? "after removal of:" : "" if $verbose;
-print "	${$removed}{redclus} iterations with redundant parameter combinations\n" if($verbose and ${$removed}{red});
-print "	${$removed}{redl} iterations with erroneous length specifications\n" if($verbose and ${$removed}{lerr});
+print "Inputs and parameters parsed successfully, mode is \"$mode\". Calculating iterations...\n";
 
-######################################################
-# SET UP LOGGING
 #
+# Set up parameter iterations
+#
+my $iterations = parse_parameters($mode,\%parameters);
 
-my @params = sort keys %parameters;
+my @n_iter = sort keys %$iterations;
+
+my ($disp_stat,$disp_n);
+if ($mode eq "stat"){
+	die "Error: mode \"stat\" only accepts one file and one parameter set, see \"$script --help\" for more information\n" unless ($#files == 0 && $#n_iter == 0);
+	if($display eq "groups"){
+		$disp_stat = "size";
+	} else {
+		($disp_stat,$disp_n) = split("-", $display) or die "Error parsing argument to --display\n";
+		die "Error: --display $display not recognised, must be a request to display \"groups\", \"size\" or \"maxlength\"\n" unless($disp_stat eq "size" || $disp_stat eq "maxlength");
+	}
+} # OTHER ERROR CATCHES?
+
+printf "%d iterations successfully parsed. Ready to start processing.\n",$#n_iter+1;
 
 my %log;
 
 my %stats = (
-	general => ['filename','sequences','iteration','unique_sequences','freq_discarded','length_discarded','unique_remain'],
-	group   => ['mean_copies','stdev_copies','min_copies','max_copies','max_copies_pc'],
-	filter  => ['filteroutcome','bootstrap_pvalue','n_uniques_pooled','selected_rank','pooled_copies'],
+	general => ['filename','sequences','iteration','length_discarded','total_groups','n_groups_discarded_<minsize','n_groups_remain'],
+	group   => ['mean_groupsize','stdev_groupsize','min_groupsize','max_groupsize','max_groupsize_pc'],
+	filter  => ['filteroutcome','groupselected','bootstrap_pvalue','n_groups_pooled','selected_rank','pooled_size'],
 );
 
 
-######################################################
-# RUN GROUPING AND FILTERING
-#
-
-# ITITIALISE FORKER AND VARIABLES
-
-my $pm = Parallel::ForkManager->new($threads);
-my $done_iterations;
-
-# SET UP COMPLETION CLEANER
-
-$pm->run_on_finish( sub {
-	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
-	$done_iterations++;
-	printf "Completed $done_iterations/%d total iterations\r",(scalar keys %$iterations)*(scalar @files) unless $verbose;
+my $logline;
+if($mode eq "stat"){
+	print "\nProcessing sample\n" if $verbose;
+	$log{1} = read_group_and_filter($files[0],$iterations,1,$blastthreads,\@params,\%stats);
+	histograms_and_output($log{1},$disp_stat,$outpath);
+} elsif($mode eq "batch" or $mode eq "eval"){
 	
-	my $iter = $data_structure_reference->{iter};
-	my $file = $data_structure_reference->{file};
-	$log{$iter}{$file} = $data_structure_reference->{result};
-});
+	my $pm = Parallel::ForkManager->new($threads);
+	my $done_iterations=0;
 
-# DO DEREPLICATION, FILTERING AND SELECTION
-
-printf "\nStarting %d filtering iterations using $threads threads:\n", (scalar keys %$iterations)*(scalar @files);
-
-foreach my $file (@files){
-	foreach my $iter (keys %$iterations){;
-		my $pid = $pm->start and next;
+	$pm->run_on_finish( sub {
+		my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+		$done_iterations++;
+		printf "Completed $done_iterations/%d total iterations\r",($#n_iter+1)*($#files+1) unless $verbose;
 		
-		my $out = read_derep_filter_select($file,$iterations,$iter,$blastthreads,\@params,\%stats);
+		my $line = $data_structure_reference->{line};
+		$log{$line} = $data_structure_reference->{result};
+	});
+	
+	printf "\nStarting %d filtering iterations using $threads threads:\n", ($#n_iter+1)*($#files+1);
+	foreach my $file (@files){
+		foreach my $iter (@n_iter){;
+			my $pid = $pm->start and next;
 		
-		$pm->finish(0, {result => $out, iter => $iter, file => $file});
+			$logline = "$file.$iter";
+			my $out = read_group_and_filter($file,$iterations,$iter,$blastthreads,\@params,\%stats);
+		
+			$pm->finish(0, {result => $out, line => $logline});
+		}
 	}
+	
+	$pm->wait_all_children;
+	print "\n" unless $verbose;
+} else {
+	die "Mode not recognised\n";
 }
 
-# FINALISE
+my $highsuccesses = 0;
+my $lowsuccesses = 0;
 
-$pm->wait_all_children;
-print "\n" unless $verbose;
+if($mode eq 'batch'){
+	map { $highsuccesses++ if $log{$_}{filteroutcome} eq "high confidence" } keys %log;
+	map { $lowsuccesses++ if $log{$_}{filteroutcome} eq "low confidence" } keys %log;
+	printf "\n$script successfully selected $highsuccesses high confidence and $lowsuccesses low confidence sequences from %d files with given filtering parameters, see log for details\n",scalar keys @files ;
+}
 
-######################################################
-# PRODUCE OUTPUT LOGS
+#
+# Output results log
 #
 
-# Open log file and start printing
+open my $logcsv, '>', "$outpath/select.$mode.log.csv";
 
-open my $logcsv, '>', "$outpath/select.log.csv";
 my @head = (@{$stats{general}},@params,@{$stats{group}},@{$stats{filter}});
 print $logcsv join(',',@head);
 
-# LOOP ON ITERATION
+open my $outhighfa, '>', "$outpath/select.sequences.highconfidence.fa" if($mode eq 'batch' and $highsuccesses>0);
+open my $outlowfa, '>', "$outpath/select.sequences.lowconfidence.fa" if($mode eq 'batch' and $lowsuccesses>0);
 
-foreach my $iter (keys %log){
-	
-	# Open output files
-	
-	open my $outhighfa, '>', "$outpath/select.sequences.highconfidence_iteration$iter.fa";
-	open my $outlowfa, '>', "$outpath/select.sequences.lowconfidence_iteration$iter.fa";
-	
-#	# Check for successes
-#	
-#	map { $highsuccesses++ if $log{$_}{filteroutcome} eq "high confidence" } keys %log;
-#	map { $lowsuccesses++ if $log{$_}{filteroutcome} eq "low confidence" } keys %log;
-#	
-	# Print to output files
-	
-	foreach my $file (@files){
-		print $logcsv "\n",join(',',@{$log{$iter}{$file}}{@head});
-		print $outhighfa ">$log{$iter}{$file}{filename}\n$log{$iter}{$file}{sequence}\n" if($log{$iter}{$file}{filteroutcome} eq 'high confidence');
-		print $outlowfa ">$log{$iter}{$file}{filename}\n$log{$iter}{$file}{sequence}\n" if($log{$iter}{$file}{filteroutcome} eq 'low confidence');
-	}
-	
-	# Close output files
-	close $outhighfa;
-	close $outlowfa;
+foreach my $i (keys %log){
+	print $logcsv "\n",join(',',@{$log{$i}}{@head});
+	print $outhighfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and $highsuccesses>0 and ${$log{$i}}{filteroutcome} eq 'high confidence');
+	print $outlowfa ">${$log{$i}}{filename}\n${$log{$i}}{sequence}\n" if($mode eq 'batch' and $lowsuccesses>0 and ${$log{$i}}{filteroutcome} eq 'low confidence');
 }
-
-# Close log file
-
 close $logcsv;
-print "\nCSV log successfully written to $outpath/select.log.csv\n";
+close $outhighfa if($mode eq 'batch' and $highsuccesses>0);
+close $outlowfa if($mode eq 'batch' and $lowsuccesses>0);
 
+print "\nCSV log successfully written to $outpath/select.$mode.log.csv\n";
+print "Fastas of selected sequences successfully written to $outpath/\n" if($mode eq 'batch');
 print "\n";
 
 exit;
@@ -351,174 +282,206 @@ my @time = localtime;
 return sprintf "%02d:%02d:%02d",$time[2],$time[1],$time[0];
 }
 
-sub read_derep_filter_select{
-	
-	# Load variables
+sub read_group_and_filter{
 	my ($file,$iterations,$iter,$blastthreads,$params,$stats) = @_;
 	
 	my %log;
-	my $n_iter = scalar keys %$iterations;
 	
-	# READ FASTA
-	
+	#
+	# Read in fasta
+	#
 	my %fasta = read_fasta($file);
 	my ($name,$dir)=fileparse($file);
-	$name =~ s/^(.+)\.[^\.]+$/$1/;
 	
+	$name =~ s/^(.+)\.[^.]+$/$1/;
 	warn "Warning: file $name is empty!\n" if(scalar keys %fasta < 1);
 	
-	printf "%s: starting parameter iteration $iter of %d for $name with pid $$\n", timestamp(), $n_iter if($verbose and $n_iter>0);
-	my $printstring = join "", ($threads>1 and ($n_iter>0 or $#files>0)) ? "pid $$ " : "", $name, $n_iter>1 ? " iteration $iter" : "";
+	printf "%s: starting parameter iteration $iter of %d for $name with pid $$\n", timestamp(), $#n_iter+1 if($verbose and $#n_iter>0);
+	my $printstring = join "", ($threads>1 and ($#n_iter>0 or $#files>0)) ? "pid $$ " : "", $name, $#n_iter>1 ? " iteration $iter" : "";
 	
-	# DEREPLICATION AND FILTERING
-	
-	# Prepare for length filtering
-	
-	my ($seql, $minl, $maxl, $cvar) = (${$iterations}{$iter}{seqlength}, ${$iterations}{$iter}{minlength}, ${$iterations}{$iter}{maxlength}, ${$iterations}{$iter}{var_by_codon});
-	my $nex = ($minl ne 'NA') + ($maxl ne 'NA') + ($cvar ne 'NA');
-	
-	# Print message
-	
-	print timestamp(),": $printstring dereplicating" if $verbose; 
-	if($nex > 0){
-		print " filtering out sequences";
-		if($minl){
-			print " shorter than $minl";
-			print "," if $nex == 3;
-			print " and" if $nex == 2;
-		}
-		if($maxl){
-			print " longer than $maxl";
-			print "and" if $cvar;
-		}
-		print " not a multiple of 3 bases less or more than $seql" if $cvar;
+	#
+	# Grouping function
+	#
+	my $len = ${$iterations}{$iter}{seqlength};
+	my $lvar = ${$iterations}{$iter}{length_var};
+	my $minl = floor($len-($lvar*$len)/100);
+	my $maxl = ceil($len+($lvar*$len)/100);
+
+	print timestamp(),": $printstring grouping all sequences between ${minl}bp and ${maxl}bp by ", ${$iterations}{$iter}{nest} ? "nested identity\n" : "identity\n" if $verbose ;
+	my ($groups,$length_discarded,$totalgroups,$minsize_discarded) = group(\%fasta,${$iterations}{$iter},$printstring,$minl,$maxl);
+	print timestamp(),": $printstring $length_discarded sequences discarded for being less than ${minl}bp or more than ${maxl}bp long\n" if $verbose;
+	print timestamp(),": $printstring $minsize_discarded groups discarded for having fewer than ${$iterations}{$iter}{minsize} sequences\n" if $verbose;
+	#
+	# Sort groups by size
+	#
+	my @gids = keys %$groups;
+	my %groupsort;
+	foreach my $g (@gids){
+		$groupsort{$g} = $groups->{$g}{size};
 	}
-	print "\n";
+	my ($ngroup,$topsize,$totseq) = @gids ? (scalar keys %groupsort,max(values %groupsort),sum(values %groupsort)) : (0,0,0);
+	print timestamp(),": $printstring $ngroup groups containing $totseq sequences remain of the original $totalgroups groups\n" if($verbose or $mode eq 'stat');
+
+	#
+	#Filtering
+	#
+	print timestamp(),": $printstring filtering $ngroup groups\n",   if $verbose;
 	
-	# Do derep
-	my %dereplicated;
+	my $filterresult = filter_groups($groups,${$iterations}{$iter},$stats{filter},$blastthreads,$printstring);
 	
-	foreach my $id (keys %fasta){
-		$dereplicated{$fasta{$id}}++;
-	}
-	
-	my $nunique = scalar keys %dereplicated;
-	
-	printf timestamp(), ": $printstring dereplicated %d sequences into $nunique uniques\n", scalar keys %fasta if $verbose;
-	
-	# Do size filter
-	
-	foreach my $seq(keys %dereplicated){
-		delete $dereplicated{$seq} if $dereplicated{$seq} < ${$iterations}{$iter}{minsize};
-	}
-	
-	my $minfreq_discarded = $nunique - scalar keys %dereplicated;
-	
-	print timestamp(), ": $printstring $minfreq_discarded unique sequences discarded for having fewer than ${$iterations}{$iter}{minsize} copies\n" if $verbose;
-	
-	# Do length filter
-	
-	my $length_passed = 0;
-	
-	foreach my $seq (keys %dereplicated){
-		my $curlen = length($seq);
-		
-		if((($minl ne 'NA' and $curlen >= $minl) or $minl eq 'NA') and 
-		   (($maxl ne 'NA' and $curlen <= $maxl) or $maxl eq 'NA')){
-			
-			if((($cvar ne 'NA' and (($curlen - $seql) % 3) == 0) or $cvar eq 'NA')){
-				$length_passed++;
-			} else {
-				delete $dereplicated{$seq};
-			}
-			
-		} else {
-			delete $dereplicated{$seq};
-		}
-	}
-	
-	my $length_discarded = $nunique - $length_passed;
-	
-	print timestamp(),": $printstring $length_discarded unique sequences removed for failing length criteria\n" if $verbose;
-	
-	# DO SELECTION PROCESS
-	
-	printf timestamp(),": $printstring processing %d unique sequences to designate selected sequence\n", scalar keys %dereplicated if $verbose;
-	
-	my ($selectseq, $selectlog) = select_sequence(\%dereplicated, ${$iterations}{$iter}, $stats{filter}, $blastthreads, $printstring);
-	
+	#
 	# Do logging
-	my @frequencies = values %dereplicated;
-	
-	@log{@{${$stats}{general}}} = ($name, scalar keys %fasta, $iter, $nunique, $minfreq_discarded, $length_discarded, scalar keys %dereplicated);
-	@log{@{${$stats}{group}}} = scalar keys %dereplicated > 0 ?
-							(sum(@frequencies)/scalar @frequencies,
-							 stdev(@frequencies),
-							 min(@frequencies),
-							 max(@frequencies),
-							 max(@frequencies)/scalar @frequencies) 
-								  : 
-							 ((0) x 5);
-	@log{@{${$stats}{filter}}} = @{$selectlog}{@{${$stats}{filter}}};
+	#
+	@log{@{${$stats}{group}}} = @gids ? ($totseq/$ngroup,stdev(values %groupsort),min(values %groupsort), $topsize,$topsize/$totseq) : ((0) x 5);
+	@log{@{${$stats}{general}}} = ($name, scalar keys %fasta, $iter, $length_discarded, $totalgroups, $minsize_discarded, $ngroup);
+	@log{@{${$stats}{filter}}} = @{$filterresult}{@{${$stats}{filter}}};
 	@log{@$params} = @{${$iterations}{$iter}}{@$params};
 	
-	# Finalise and output
-	
-	if ($selectseq){
-		print timestamp(),": $printstring sequence selected\n" if $verbose;
-		$log{sequence} = $selectseq;
+	#
+	# Take actions if filtering successful
+	#
+	if (${$filterresult}{filteroutcome} ne 'nosequences'){
+		print timestamp(),": $printstring candidate sequence selected\n" if $verbose;
+		$log{sequence} = $groups->{$log{groupselected}}{seq};
 	} else {
-		print timestamp(),": $printstring no sequence could be selected, see log for details\n" if $verbose;
-		$log{sequence} = "";
+		print timestamp(),": $printstring no candidate sequence could be selected, see log for details\n" if $verbose;
+		$log{sequence} = "-";
 	}
 	
+	#
+	# Record groups and return
+	#
+	#$log{groups} = $groups;
 	return \%log;
 }
 
-sub select_sequence{
-	# Load variables
-	my ($uniques,$specs,$loghead,$blastthreads,$printstring) = @_;
+
+sub group {
+	my ($fa,$specs,$printstring,$minl,$maxl) = @_;
+	#Sort all sequences in the fasta by length, so the sequence that initialises a group will always be the longest
+	my @ids = sort { length($fa->{$b}) <=> length($fa->{$a}) } keys %$fa;
+	my %fa_grouped;
+	my @group_ids;
+	my $group_id;
+	my $length_discarded = 0;
+	# Place each sequence within the length requirments into a group or start a new one
+	foreach my $i (0 .. $#ids){
+		my $start = -1;
+		printf "length %d\n",length($fa->{$ids[$i]}) if $debug;
+		if(length($fa->{$ids[$i]}) < $minl or length($fa->{$ids[$i]}) > $maxl){
+			$length_discarded++;
+		} else {
+			foreach my $j (0 .. $#group_ids){ 
+				if(${$specs}{nest}){
+					{ no warnings 'uninitialized'; $start = index($fa_grouped{$group_ids[$j]}{seq},$fa->{$ids[$i]}); } # supresses warning that will arise for first sequence with no group to check against
+				} else {
+					$start = 0 if($fa_grouped{$group_ids[$j]}{seq} eq $fa->{$ids[$i]});
+				}
+				if($start>-1){
+					$fa_grouped{$group_ids[$j]} = add_group($fa_grouped{$group_ids[$j]},$start, $ids[$i],$fa->{$ids[$i]});
+					last;
+				}
+			}
+			if($start == -1){
+				$group_id++;
+				$fa_grouped{$group_id} = new_group($ids[$i],$fa->{$ids[$i]}); 
+				push @group_ids, $group_id;
+			}
+		}
+		my $ngrouped = ($i+1)-$length_discarded;
+		printf "%s: $printstring grouped %d/%d sequences into %d groups, %d discarded due to length\n",timestamp(),$ngrouped,scalar @ids,scalar @group_ids,$length_discarded,if($verbose and $ngrouped>0 and (($ngrouped/1000)=~/^\d+$/ or $i==$#ids));
+	}
+	my $totalgroups = scalar keys %fa_grouped;
+	print "fa_grouped hash has $totalgroups keys\n" if $debug;
+	my $minsize_discarded = 0;
+	printf "%s: $printstring removing groups that have fewer than %d members\n",timestamp(),${$specs}{minsize};
+	if(${$specs}{minsize}>1){
+		foreach my $g (sort keys %fa_grouped){
+			print "group $g has $fa_grouped{$g}{size} members..." if $debug;
+			if($fa_grouped{$g}{size}<${$specs}{minsize}){
+				delete $fa_grouped{$g};
+				$minsize_discarded++;
+				print "group discarded" if $debug;
+			} else {
+				print "group retained" if $debug;
+			}
+			printf ", $minsize_discarded total discarded, %d groups remain\n",scalar keys %fa_grouped if $debug;
+		}
+	}
+	return(\%fa_grouped,$length_discarded,$totalgroups,$minsize_discarded);
+}
+
+sub new_group {
+	my ($s_id,$s_seq) = @_;
+	my %out = (
+		seq => $s_seq,
+		id  => $s_id,
+		size => 1,
+		maxlength => length($s_seq),
+		lengths => [length($s_seq)],
+		basefreq => [(1) x length($s_seq)],
+		members => {
+			$s_id => {
+				start => 1,
+				length => length($s_seq),
+				}
+			}
+		);
+	return \%out;
+}
+
+sub add_group {
+	my($s_hash, $s_start,$s_id,$s_seq) = @_;
+	$s_hash->{members}->{$s_id} = {
+				start => $s_start+1,
+				length => length($s_seq),
+				};
+	$s_hash->{size}++;
+	push @{$s_hash->{lengths}}, length($s_seq);
+	my @bases = ((0) x $s_start, (1) x length($s_seq), (0) x ($s_hash->{maxlength} - $s_start - length($s_seq)));
+	@{$s_hash->{basefreq}} = pairwise {$a + $b} @bases, @{$s_hash->{basefreq}};
+	return $s_hash;
+}
+
+sub filter_groups{
+	my ($groups,$specs,$loghead,$blastthreads,$printstring) = @_;
+	
+	my @gids = keys %$groups;
+	my %groupsort;
+	foreach my $g (@gids){
+		$groupsort{$g} = $groups->{$g}{size};
+	}
+	
+	my @stat_sorted = sort { $b <=> $a } values %groupsort;
+	my @gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
+	
+	my $stat_sorted_top = $stat_sorted[0];
+	my $gids_sorted_top = $gids_sorted[0];
 	
 	my %log;
 	
-	# SORT BY LENGTH
+	print timestamp(),": $printstring starting filtering in order of group size (largest->smallest)\n" if $verbose;
 	
-	my @sorted_seq = sort { ${$uniques}{$a} <=> ${$uniques}{$b} } keys %$uniques;
-	my @sorted_size = @{${$uniques}{@sorted_seq}};
-	
-	my $topseq = $sorted_seq[0];
-	my $topsize = $sorted_size[0];
-	
-	# START SELECTION
-	
-	print timestamp(),": $printstring initiating selection with most abundant unique sequence\n" if $verbose;
-	
-	my $selection=1;
-	my $uniquespooled=0;
+	my $gselection=1;
+	my $groupspooled=0;
 	my $confidence;
 	my $bootstrapskip;
-	my $selectedseq;
-	
 	while(1){
 		my $blastfail;
 		
-		printf "%s: $printstring assessing sequence $selection%s\n", timestamp(), $uniquespooled>0 ? "($uniquespooled copies)":"" if $verbose;
-		
-		if (!@sorted_seq){
-			print timestamp(),": $printstring no sequences passed filtering parameters, entire sample discarded\n";
-			@log{@$loghead} = ('nosequences',("NA") x 3,0);
+		printf "%s: $printstring assessing group $gselection%s\n", timestamp(), $groupspooled>0 ? "(pool of $groupspooled)":"" if $verbose;
+		if (!@stat_sorted){
+			print timestamp(),": $printstring no sequences passed grouping parameters, entire sample discarded\n";
+			@log{@$loghead} = ('nosequences',("NA") x 4,0);
 			last;
 		}
 		
 		my $pvalue;
-		
-		# STEP 1: DO BOOTSTRAPPING TO ASSESS CONFIDENCE
-		
 		if(!$bootstrapskip){
 			# Bootstrap
-			printf "%s: $printstring running ${$specs}{bootstraps} bootstraps placing %d sequences randomly into %d uniques to find probability of sequences with %d copies\n", timestamp(), sum(@sorted_size),scalar @sorted_size, max(@sorted_size), if $verbose;
+			printf "%s: $printstring running ${$specs}{bootstraps} bootstraps placing %d sequences randomly into %d groups to find probability of group with %d members\n", timestamp(), sum(@stat_sorted),scalar @stat_sorted, max(@stat_sorted), if $verbose;
 			
-			$pvalue = bootstrap(${$specs}{bootstraps}, \@sorted_size);
+			$pvalue = bootstrap(${$specs}{bootstraps},@stat_sorted);
 			
 			print timestamp(),": $printstring bootstrap value $pvalue against ${$specs}{pvalue} (max ${$specs}{pvalue_maxthreshold})\n" if $verbose;
 			
@@ -526,124 +489,105 @@ sub select_sequence{
 				
 				# Absolutely no significance, no point in trying to (further) group by similarity
 				
-				#@log{@$loghead} = ('exceeded_max_pvalue','NA',$pvalue,$uniquespooled,$selection,$stat_sorted[0]);
-				print timestamp(),": $printstring sequence $selection exceeded maximum pvalue. The most frequent sequence will be considered with low confidence\n" if $verbose;
+				#@log{@$loghead} = ('exceeded_max_pvalue','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
+				print timestamp(),": $printstring group $gselection exceeded maximum pvalue. The most frequent sequence will be considered with low confidence\n" if $verbose;
 				$confidence = "low";
 			} elsif($pvalue <= ${$specs}{pvalue}){
 				
 				# Significantly distinct
-				print timestamp(),": $printstring sequence $selection significantly distinct. This sequence will be considered with high confidence\n" if $verbose;
+				print timestamp(),": $printstring group $gselection significantly distinct. This sequence will be considered with high confidence\n" if $verbose;
 				$confidence = "high";
 				
 			}
 		}
 		
-		# STEP 2: DO BLASTING TO ASSESS TAXONOMY
-		
-		my $blastq;
-		my $blastz;
-		my $select_rank;
-		
-		if($confidence eq "high"){
-			$blastq = $sorted_seq[0];
-			$blastz = $sorted_size[0];
-			$select_rank = $selection;
-		} else {
-			$blastq = $topseq;
-			$blastz = $topsize;
-			$select_rank = 1;
-		}
 		if($confidence){
-			if($blastskip){
-				print timestamp(),": $printstring skipping BLAST step and just outputting sequence $select_rank\n" if $verbose;
-				@log{@$loghead} = ("$confidence confidence",$pvalue,$uniquespooled,$select_rank,$blastz);
+			
+			# BLAST
+			
+			my $blastg;
+			if($confidence eq "high"){
+				$blastg = $gids_sorted[0];
+			} else {
+				$blastg = $gids_sorted_top;
+			}
+			
+			print timestamp(),": $printstring BLASTing with $blastthreads threads for best-guess taxonomy to check against target \"${$specs}{blasttarget}\"\n" if $verbose;
+			
+			my @blastbestguess = taxonomyblast($groups->{$blastg}{seq},$specs,$blastthreads);
+			my %blast;
+			if(!@blastbestguess){
+				print timestamp(),": $printstring WARNING: could not retrieve a BLAST taxonomy, BLAST likely failed all 5 tries OR only one hit was returned\n";
+			} else {
+				print timestamp(),": $printstring retrieved taxonomy\n" if $verbose;
+				%blast = map { $_ => 1} @blastbestguess;
+			}
+			if(exists($blast{${$specs}{blasttarget}})){
+				@log{@$loghead} = ("$confidence confidence",$gids_sorted[0],$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
+				print timestamp(),": $printstring group $gselection passed BLAST filter, done with $confidence confidence\n" if $verbose;
 				last;
 			} else {
-				print timestamp(),": $printstring BLASTing with $blastthreads threads for best-guess taxonomy to check against target \"${$specs}{blasttarget}\"\n" if $verbose;
-				
-				my @blastbestguess = taxonomyblast($blastq,$specs,$blastthreads);
-				my %blast;
-				if(!@blastbestguess){
-					print timestamp(),": $printstring WARNING: could not retrieve a BLAST taxonomy, BLAST likely failed all 5 tries OR only one hit was returned. Treating as if this sequence has failed.\n";
-					$blastfail = 1;
-				} else {
-					print timestamp(),": $printstring retrieved taxonomy\n" if $verbose;
-					%blast = map { $_ => 1} @blastbestguess;
-				}
-				if(exists($blast{${$specs}{blasttarget}})){
-					@log{@$loghead} = ("$confidence confidence",$pvalue,$uniquespooled,$select_rank,$blastz);
-					print timestamp(),": $printstring sequence $select_rank passed BLAST filter, done with $confidence confidence\n" if $verbose;
-					$selectedseq = $blastq;
-					last;
-				} else {
-					print timestamp(),": $printstring sequence $select_rank failed BLAST filter, attempting to move on to other sequences\n" if $verbose;
-					$blastfail = 1;
-				}
+				print timestamp(),": $printstring group $gselection failed BLAST filter, attempting to move on to other sequences\n" if $verbose;
+				$blastfail = 1;
 			}
-		}
 		
-		# STEP 4: MERGE SEQUENCES IF NECESSARY
+		}
 		
 		if(($pvalue < ${$specs}{pvalue_maxthreshold} and $pvalue > ${$specs}{pvalue}) or $blastfail){
 			
-			# First check if more than one group left or if we've already discarded too many groups
-			if(scalar @sorted_seq == 1 or $selection >= ${$specs}{maxgroupscheck}){  
-				if($blastfail and scalar @sorted_seq == 1){
-					print timestamp(),": $printstring sequence $selection not sufficiently similar to target taxon. No further sequences exist. No selection can be made.\n" if $verbose;
-					@log{@$loghead} = ('groups_exhausted',$pvalue,$uniquespooled,$selection,$sorted_size[0]);
+			# Marginal significance, try grouping by similarity
+			
+			if($#gids_sorted == 0 or $gselection >= ${$specs}{maxgroupscheck}){  # First check if more than one group left or if we've already discarded too many groups
+				if($blastfail and $#gids_sorted == 0){
+					print timestamp(),": $printstring group $gselection not sufficiently similar to target taxon. No further groups exist. No sequence will be output.\n" if $verbose;
+					@log{@$loghead} = ('groups_exhausted','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
 					last;
-				} elsif($blastfail and $selection >= ${$specs}{maxgroupscheck}){
-					print timestamp(),": $printstring sequence $selection not sufficiently similar to target taxon. Reached maximum sequences to check threshold. No selection can be made.\n" if $verbose;
-					@log{@$loghead} = ('max_groups_reached',$pvalue,$uniquespooled,$selection,$sorted_size[0]);
+				} elsif($blastfail and $gselection >= ${$specs}{maxgroupscheck}){
+					print timestamp(),": $printstring group $gselection not sufficiently similar to target taxon. Reached maximum groups to check threshold. No sequence will be output.\n" if $verbose;
+					@log{@$loghead} = ('max_groups_reached','NA',$pvalue,$groupspooled,$gselection,$stat_sorted[0]);
 					last;
 				} else {
-					print timestamp(),": $printstring sequence $selection not sufficiently distinct and/or no further sequences exist. The most frequent sequence will be considered, but will be written to lowconfidence output.\n" if $verbose;
+					print timestamp(),": $printstring group $gselection not sufficiently distinct and/or no further groups exist. The most frequent sequence will be considered, but will be written to lowconfidence output.\n" if $verbose;
 					$confidence = "low";
 					$bootstrapskip = 1;
 					continue;
 				}
 			}
 			
-			print timestamp(),": $printstring sequence $selection did not pass. Checking similarity to next most abundant sequence to see if pooling sequences is appropriate\n" if $verbose;
+			print timestamp(),": $printstring group $gselection did not pass. Checking similarity to next-largest group to see if pooling groups is appropriate\n" if $verbose;
 			
 			#Calculate similarity
-			
-			my $muscle = `printf \">".$sorted_size[0]."\\n".$sorted_seq[0]."\\n>".$sorted_size[1]."\\n".$sorted_seq[1]."\\n\" | muscle 2> /dev/null`;
+			my $muscle = `printf \">".$gids_sorted[0]."\\n".$groups->{$gids_sorted[0]}{seq}."\\n>".$gids_sorted[1]."\\n".$groups->{$gids_sorted[1]}{seq}."\\n\" | muscle 2> /dev/null`;
 			my @muscleout = split("\n",$muscle);
 			my $pc_id = identity($muscleout[1],$muscleout[3]);
-			
-			print timestamp(),": $printstring sequences are $pc_id identical, against criterion of ${$specs}{identity}\n" if $verbose;
-			
+			print timestamp(),": $printstring groups are $pc_id identical, against criterion of ${$specs}{identity}\n" if $verbose;
 			#Check similarity
-			
 			if ($pc_id >= ${$specs}{identity}) {
-				print timestamp(),": $printstring sequences are similar enough, pooling together and starting again with the pooled sequence...\n" if $verbose;
-				my $maxsize = shift @sorted_size;
-				my $maxseq = shift @sorted_seq;
-				$sorted_size[0] += $maxsize;
-				$sorted_seq[0] = $maxseq;
-				$uniquespooled++;
+				print timestamp(),": $printstring groups are similar enough, pooling together and starting again with the pooled group...\n" if $verbose;
+				my $maxstat = shift @stat_sorted;
+				my $maxgid = shift @gids_sorted;
+				$stat_sorted[0] += $maxstat;
+				$gids_sorted[0] = $maxgid;
+				$groupspooled++;
 			} else {
-				print timestamp(),": $printstring sequence are not similar enough, discarding sequence $selection and starting again with next-largest group...\n" if $verbose;
-				shift @sorted_seq;
-				shift @sorted_size;
-				$selection += 1;
-				$uniquespooled = 0;
+				print timestamp(),": $printstring groups are not similar enough, discarding group $gselection and starting again with next-largest group...\n" if $verbose;
+				shift @stat_sorted;
+				shift @gids_sorted;
+				$gselection+=1+$groupspooled;
+				$groupspooled = 0;
 			}
-		
-		# RESTART WITH MERGED SEQUENCES
-		
 		}
 		
 	}
-	return($selectedseq, \%log)
+	return(\%log)
 }
 
 sub bootstrap{
-	my ($boots, $values) = @_;
-	my $max = max(@$values);
-	my $ngroups = scalar @$values;
-	my $nseqs = sum(@$values);
+	my $boots = shift @_;
+	my @values = @_;
+	my $max = max(@values);
+	my $ngroups = $#values+1;
+	my $nseqs = sum(@values);
 	print "Bootstrapping debug - passed values: $boots bootstraps on $ngroups groups sorting $nseqs sequences to find null probability of a group with $max sequences\n" if $debug;
 	my $nsuccesses = 0;
 	foreach (1..$boots) {
@@ -658,16 +602,9 @@ sub bootstrap{
 }
 
 sub taxonomyblast{
-	# Load data
-	
 	my ($seq,$parameters,$blastthreads) = @_;
-	
-	# Set up command
 	my $blastcmd = "blastn -query <(echo -e \">sample\\n$seq\") -db $blastpath -num_threads $blastthreads -max_target_seqs ${$parameters}{blasthits} -outfmt \"6 sacc bitscore\"";
 	print "BLAST command:\n$blastcmd\n" if $debug;
-	
-	# Do BLASTing
-	
 	my $blastdump;
 	my $blasttries = 0;
 	while(!$blastdump && $blasttries<5){
@@ -675,51 +612,26 @@ sub taxonomyblast{
 		$blasttries++;
 		print "BLAST attempt $blasttries\n" if $debug;
 	}
-	
-	# PARSE BLAST DATA
-	
 	my @out;
 	if($blastdump){
 		print "BLAST successfully output data.\n";
-		
-		# Parse accessions
 		my @accessions = ($blastdump =~ /(?:^|\n)(\w+)/g);
 		my $accessionstring = join ",",@accessions;
 		my $naccessions = scalar @accessions;
 		print "$naccessions accessions recovered:\n$accessionstring\n" if $debug;
-		
-		# Retrieve NCBI data
 		if($naccessions>1){
-			# Retrieve taxid data
-			
-			my $url  = "http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta";
-			print "EUTILS url:\n$url\n" if $debug;
-			my $nucdump = get($url) or die "Error: failed to recover taxonomy information for accessions from NCBI";
-			#my $url_pull = $browser->get($url);
-			#print Dumper $url_pull;
-			
-			# Parse out taxids
-			
-			#my $nucdump = $url_pull->content;
-			print $nucdump;
+	#		print $accessionstring,"\n";
+			my $nucdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta");
 			my $taxidstring = join ",",($nucdump =~ /<TSeq_taxid>(.*)<\/TSeq_taxid/g);
 	#		print $taxidstring,"\n";
 			print "Taxids recovered:\n$taxidstring\n" if $debug;
-			
-			# Retrieve taxonomy data
-			
-			my $taxdump = get("http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
-			
-			# Parse out lineages
+			my $taxdump = get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
 			my @lineages = ($taxdump =~ /<Lineage>(.*)<\/Lineage>/g);
 			printf "%d lineages recovered:\n%s\n", scalar @lineages,join("\n",@lineages) if $debug;
 			my @linaoa;
 			foreach my $i (0..$#lineages){
 				$linaoa[$i] = [ split /;\s/,$lineages[$i] ];
 			}
-			
-			# Score lineages
-			
 			print "Filtering lineages against blastthreshold ${$parameters}{blastthreshold}\n" if $debug;
 			my $ti = -1;
 			my @htind = (1..$#linaoa);
@@ -736,6 +648,103 @@ sub taxonomyblast{
 	return @out;
 }
 
+sub histograms_and_output{
+	my ($log,$disp_stat,$outpath) = @_;
+	my $groups = ${$log}{groups};
+	my @gids = keys %$groups;
+	
+	if(@gids){
+		my %groupsort;
+		foreach my $g (@gids){
+			$groupsort{$g} = $groups->{$g}{size};
+		}
+		#
+		# Display histograms
+		#
+		my (@stat_sorted,@gids_sorted);
+		if($disp_stat eq "maxlength"){
+			foreach my $g (@gids){
+				$groupsort{$g} = ${$groups}{$g}{maxlength};
+			}
+		
+			@stat_sorted = sort { $b <=> $a } values %groupsort;
+			@gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
+		} else {
+			@stat_sorted = sort { $b <=> $a } values %groupsort;
+			@gids_sorted = sort { $groupsort{$b} <=> $groupsort{$a} } keys %groupsort;
+		}
+		if($display eq "groups"){
+			print "Histogram of $disp_stat values for all groups\n";
+			histogram (\@stat_sorted,10);
+		} else {
+			print "Histogram of sequence lengths within group $gids_sorted[$disp_n-1] with rank $disp_n $disp_stat value $stat_sorted[$disp_n-1]\n";
+			histogram(\@{${$groups}{$gids_sorted[$disp_n-1]}{lengths}},10);
+			print "Histogram of base frequencies by position within group $gids_sorted[$disp_n-1] with rank $disp_n $disp_stat value $stat_sorted[$disp_n-1]\n";
+			histogram(\@{${$groups}{$gids_sorted[$disp_n-1]}{basefreq}},10);
+			my @matches =  map { $stat_sorted[$disp_n-1] == $_ ? 1 : 0 } @stat_sorted;
+			warn "Warning: groups of other rank have the same $disp_stat value, make sure to check a rank above and below $disp_stat if appropriate\n" if(sum(@matches)>1);
+		}
+	
+		#
+		# Write to group log and fasta
+		#
+		my $name = ${$log}{filename};
+		print "Writing group sequences to fasta and details to log\n" if $verbose;
+#		print "$outpath/$name.stat.groups.log.csv\n";
+		open my $glog,'>',"$outpath/$name.stat.groups.log.csv" or die "Error, couldn't open csv for writing group log\n";
+		open my $gfa_out, '>', "$outpath/$name.stat.groups.fa" or die "Error, couldn't open fa for writing\n";
+	
+		print $glog "group,n_sequences,min_length,max_length,mean_length,stdev_length\n";
+		foreach my $gi (0..$#gids_sorted){
+			print $glog "$gids_sorted[$gi],$stat_sorted[$gi],";
+			my @out_lengths = @{${$groups}{$gids_sorted[$gi]}{lengths}};
+			print $glog min(@out_lengths),",";
+			print $glog max(@out_lengths),",";
+			print $glog sum(@out_lengths)/@out_lengths,",";
+			print $glog stdev(@out_lengths),"\n";
+	
+			print $gfa_out ">$gids_sorted[$gi];size=$stat_sorted[$gi]\n";
+			print $gfa_out "${$groups}{$gids_sorted[$gi]}{seq}\n";
+		}
+	
+		close $gfa_out;
+		close $glog;
+	} else {
+		print "No sequences passed filtering, nothing to display\n";
+	}
+}
+
+sub histogram {
+	my($data,$bins) = @_;
+	my @values = @$data;
+	my $range = (1+max(@values))-(min(@values)-1);
+	my $step = $range/$bins;
+	my @lower_bounds;
+	my @upper_bounds;
+	my @frequencies;
+	my @frequency_lengths;
+	
+	foreach my $i (0..($bins-1)){
+	$lower_bounds[$i] = min(@values)-1+($i*$step);
+	$upper_bounds[$i] = $lower_bounds[$i]+$step;
+	my @within_bounds = grep { $_>$lower_bounds[$i] && $_<=$upper_bounds[$i] } @values;
+	$frequencies[$i] = scalar @within_bounds;
+	$frequency_lengths[$i] = length($frequencies[$i]);
+	}
+	my $longest_bin = length($upper_bounds[$#upper_bounds]);
+	my $longest_value = max(@frequency_lengths);
+	my $freq_scale = max(@frequencies)/50;
+	foreach my $i (0..($bins-1)){
+	printf('%*3$.0f->%*3$.0f|', $lower_bounds[$i],$upper_bounds[$i],$longest_bin);
+	printf(' %*s', $longest_value, $frequencies[$i]);
+	print " (";
+	printf('%5.1f',($frequencies[$i]/sum(@frequencies))*100);
+	print "%)|";
+	print '#' x ceil($frequencies[$i]/$freq_scale);
+	print "\n";
+	}
+}
+
 sub stdev {
 	my @data = @_;
 	my $mean = sum(@data)/@data;
@@ -743,149 +752,70 @@ sub stdev {
 	return sqrt( sum(@deviations)/@deviations );
 }
 
+sub identity {
+
+	my($string1, $string2) = @_;
+
+	# we assume that the strings have the same length
+	my $length = length($string1);
+	my $position;
+	my $count = 0;
+	my $gaps = 0;
+	for ($position=0; $position < $length ; ++$position) {
+		if(substr($string1,$position,1) eq substr($string2,$position,1)) {
+			++$count;
+		} elsif(substr($string1,$position,1) eq "-" || substr($string2,$position,1) eq "-"){
+			++$gaps;
+		}
+	}
+
+	return $count / ($length-$gaps);
+}
 
 
 sub parse_parameters {
-	
-	# READ INPUTS AND INITIALISE
-	
-	my ($inparams) = @_;
-	my %param_expand;
+	my ($inmode, $inparams) = @_;
+	my @itarray;
 	my @paramarray;
-	
-	# EXPAND PARAMETER RANGES TO CREATE HASH OF ARRAYS
-	
+	my $n_singleparams;
+	die "Input parameters not single values, did you mean to use \"--mode eval\"?\n" unless $inmode eq "eval" or all { $_ =~ /^[^,-]*$/ } values %$inparams;
 	foreach my $param (keys %$inparams){
-		# Add parameter name to array of parameter names
-		push @paramarray,$param;
-		
-		# Parse parameter values
-		if(!$inparams->{$param}){
-			$param_expand{$param} = [$inparams->{$param}];
-		} elsif ($inparams->{$param} =~ /[,-\/]/ ){
-			my @parts = split ',', $inparams->{$param}; 
-			my @values;
-			my @strings;
-			foreach my $part (@parts){
-				if($part =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?)\/(\d+(\.\d+)?)$/){
-					my $curmax = $1;
-					while ($curmax <= $3){
-						push @values, $curmax;
-						$curmax += $5;
-					}
-				} elsif($part =~ /^\d+(?:\.\d+)?$/) {
-					push @values, $part;
-				} elsif($part =~ /^([A-Za-z]+)$/){
-					push @strings, $part;
-				} else {
-					die "Could not successfully parse string given for $param\n";
+		push @paramarray, $param;
+		if($inmode eq "stat" or $inmode eq "batch"){
+			push @itarray, [$inparams->{$param}];
+		} elsif ($inmode eq "eval"){
+			if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
+				my @values;
+				my $curmax = $1;
+				while ($curmax <= $3){
+					push @values, $curmax;
+					$curmax += $5;
 				}
+				push @itarray, \@values;
+			} elsif($inparams->{$param} =~ /^[a-zA-Z]+(?:,[a-zA-Z]+)+$/){
+				my @values = split ',',$inparams->{$param};
+				push @itarray, \@values;
+			} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
+				push @itarray, [$inparams->{$param}];
+				$n_singleparams++;
+				die "No parameter ranges given, did you mean to use \"--mode run\"?\n" if($n_singleparams == scalar keys %$inparams);
+			} else {
+				die "Could not successfully parse string given for $param\n";
 			}
-			my @sortvalues = sort {$a <=> $b} @values;
-			push @strings, @sortvalues;
-			$param_expand{$param} = \@strings;
-		} elsif($inparams->{$param} eq 'both'){
-			$param_expand{$param} = [1, 0];
-		} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
-			$param_expand{$param} = [$inparams->{$param}];
 		} else {
-			die "Could not successfully parse string given for $param\n";
+			die "Argument passed to --mode not recognised, see \"$script --help\" for more information\n"
 		}
-		print "Complete value list for $param: ", Dumper \@{$param_expand{$param}} if $debug;
 	}
-	
-	# CREATE ARRAY OF ARRAYS CONTAINING ALL COMBINATIONS OF VALUES
 	
 	my @allarray;
-	NestedLoops([@param_expand{@paramarray}], sub {push @allarray, [ @_ ]});
 	
-	undef %param_expand;
+	NestedLoops(\@itarray, sub {push @allarray, [ @_ ]});
 	
-	# PARSE EACH COMBINATION OF VALUES TO ENSURE VALID AND FINALISE LENGTH
-	
-	my %removed;
 	my %iterhash;
-	my %itcompare;
-	my %lcompare;
-	my @uniquelparam;
-	
-	foreach my $it (1 .. scalar @allarray){
-		# Create hash for combination and put into hash of hashes
-		$iterhash{$it} = {map { $paramarray[$_] => $allarray[$it-1][$_] } 0..$#paramarray};
-		
-		print "DEBUG: prefiltered iteration $it is:\n", Dumper $iterhash{$it} if $debug;
-		
-		# Set up check on length parameters
-		my $lfilters;
-		foreach my $lf ( @{$iterhash{$it}}{('pc_var', 'base_var', 'codon_var', 'minlength', 'maxlength')} ){
-			$lfilters++ if $lf ne 'NA';
-		}
-		
-		printf "DEBUG: %d length specifications have non-NA values\n", $lfilters ? $lfilters : 0 if $debug;
-		
-		# Check over length parameters
-		
-		if($lfilters){
-			if($lfilters == 1){
-				if($iterhash{$it}{minlength} eq 'NA' and $iterhash{$it}{maxlength} eq 'NA'){
-					$iterhash{$it}{base_var} = int(0.5 + ($iterhash{$it}{seqlength} / 100) * $iterhash{$it}{pc_var}) if($iterhash{$it}{pc_var} ne 'NA');
-					$iterhash{$it}{base_var} = $iterhash{$it}{codon_var} * 3 if($iterhash{$it}{codon_var} ne 'NA');
-					@{$iterhash{$it}}{('minlength', 'maxlength')} = ($iterhash{$it}{seqlength} - $iterhash{$it}{base_var}, $iterhash{$it}{seqlength} + $iterhash{$it}{base_var});
-				}
-				#$iterhash{$it}{minlength} = 0 if $iterhash{$it}{minlength} eq 'NA';
-			} elsif($lfilters > 2 or 
-				  ($lfilters == 2 and 
-				    (($iterhash{$it}{minlength} eq 'NA' or $iterhash{$it}{maxlength} eq 'NA') 
-					or
-				     $iterhash{$it}{minlength} > $iterhash{$it}{maxlength}
-				    )
-				  )
-				){
-				delete $iterhash{$it};
-				$removed{lerr}++;
-			}
-		} else {
-#			$iterhash{$it}{minlength} = 0 if $iterhash{$it}{minlength} eq 'NA';
-#			'pc_var', 'base_var', 'codon_var', 'minlength', 'maxlength', 'var_by_codon'};
-		}
-		
-		# Check for redundant iterations
-		
-		my $lcompvalue = join "-", @{$iterhash{$it}}{('minlength', 'maxlength', 'var_by_codon')};
-		my $compvalue = $lcompvalue . "-" . join "-", @{$iterhash{$it}}{('cpv', 'assigned_cpv', 'usearch_version', 'cluster_method', 'filter_chimeras', 'denoise', 'eemax')};
-		
-		print "DEBUG: comparison value is: $compvalue\n" if $debug;
-		
-		if(exists $itcompare{$compvalue}){
-			delete $iterhash{$it};
-			$removed{red}++;
-			next;
-		} else {
-			$itcompare{$compvalue} = 1;
-			if(! exists $lcompare{$lcompvalue}){
-				push @uniquelparam, $it;
-				$lcompare{$lcompvalue} = 1;
-			}
-		}
-		
+	foreach my $it (0 .. $#allarray){
+		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
 	}
-	
-	# Finalise iterations
-	
-	my %pstore;
-	foreach my $id (keys %iterhash){
-		foreach my $param (keys %{$iterhash{$id}}){
-			$pstore{$param}{$iterhash{$id}{$param}} = 1;
-		}
-	}
-	print "DEBUG: pstore hash\n", Dumper \%pstore if $debug;
-	
-	foreach my $param (keys %pstore){
-		$param_expand{$param} = [ keys %{$pstore{$param}} ];
-	}
-	$param_expand{lvar} = [ @uniquelparam ];
-	
-	return (\%iterhash, \%param_expand, \%removed);
+	return \%iterhash;
 }
 
 sub read_fasta {
