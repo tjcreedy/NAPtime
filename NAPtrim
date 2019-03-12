@@ -1,0 +1,447 @@
+#!/usr/bin/env perl
+#By Thomas J Creedy, thomas@tjcreedy.co.uk
+
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use File::Copy qw(move);
+use File::Which;
+use List::Util qw(all any max); 
+use Algorithm::Loops qw(NestedLoops);
+use Parallel::ForkManager;
+use Time::HiRes qw(usleep);
+use Cwd qw(cwd);
+use Data::Dumper;
+
+########################################################
+# INITIALISE VARIABLES AND SET DEFAULTS
+#
+
+my $version = "0.4.2"; #25/01/2019
+my $help;
+my $outpath;
+my %parameters;
+my %itsx;
+my %primers;
+our $verbose;
+my $threads = 1;
+our $debug;
+
+my $script = basename($0,());
+
+# CREATE HELPFILE
+
+my $usage =<<USAGE;
+
+Description:
+
+	This is $script version $version of the NGS Amplicon Pipeline. It takes in a pair or set of paired files, such as those output from NAPdemux, and carries out a sequence of processes by calling external programs:
+		# Primer trimming - removes specified number of bases from F and R reads
+		# Merging - combining overlapping read pairs
+		# Filtering - removing poor quality reads 
+		# ITSx filtering - searching for fungal sequences (OPTIONAL)
+		# Read naming - adding the sample name to every read for future clustering and mapping
+	The script can run with each parameter specified with a single value, in which case it outputs a fasta for each pair of fastq files, or if parameter ranges are specified it will loop through every combination of all parameters and outputs a directory containing the fastas for each unique combination of parameters. Either way, a csv log file is output.
+	
+	For more information, see https://github.com/tjcreedy/NAPtime/wiki/NAPmerge
+
+Usage:
+
+	Basic mode
+	$script -output <dir> -forwardprimerl <n> -reverseprimerl <n> -pearquality <n> -eemax <n> [-itsx <path/to/HMMs> -taxon_itsx <tax> -region_itsx <reg> -output_itsx <full>] [-threads <n>] [-verbose] <inputfqs>
+	
+	Parameter exploration mode
+	$script -output <dir> -forwardprimerl <n> -reverseprimerl <n> -pearquality <n-n,n> -eeemax <n-n,n> [-threads <n>] [-v] <inputfqs>
+
+Arguments:
+
+	        outpath:  Path to a directory in which output files and the log table are written.
+	 forwardprimerl:  Number of bases to trim from the forward reads.
+	 reverseprimerl:  Number of bases to trim from the reverse reads.
+	fprimersequence:  A base sequence to trim from the forward reads.
+	rprimersequence:  A base sequence to trim from the reverse reads.
+	    primersfile:  Path to a file containing base sequences to trim - line 1 forward, line 2 reverse.
+	     stricttrim:  Should read pairs not matching one or both primer sequences be discarded?
+	    pearquality:  A value or range to pass to PEAR as a -q option.
+	          eemax:  A value or range to pass to USEARCH110 fastq_filter as a -fastq_maxee option
+	           itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
+	     taxon_itsx:  If ITSx is used, the taxon or taxa (according to the ITSx requirements) to filter for. Required if using ITSx, default "all".
+	    region_itsx:  If ITSx is used, the region (according to the ITSx requirements) to filter for. Currently, only one region is accepted, do not list more than one. Required if using ITSx.
+	    output_itsx:  If ITSx is used, whether to output the complete region ("complete"), complete and partial regions ("partial") or the full sequence ("full") for matching reads. Required if using ITSx.
+	        threads:  Number of CPU threads to use. Default 1.
+	        verbose:  Reports on progress.
+	           help:  Prints out this helpful message.
+
+USAGE
+
+# SET UP HEADER
+
+my $timedate = timestamp()." ".datestamp();
+my $timer = "100000";
+my $title =<<TITLE;
+  _   _          _____  _   _                 
+ | \\ | |   /\\   |  __ \\| | (_)                
+ |  \\| |  /  \\  | |__) | |_ _ _ __ ___   ___  
+ | . ` | / /\\ \\ |  ___/| __| | '_ ` _ \\ / _ \\ 
+ | |\\  |/ ____ \\| |    | |_| | | | | | |  __/ 
+ |_| \\_/_/    \\_\\_|     \\__|_|_| |_| |_|\\___| 
+TITLE
+
+
+######################################################
+# GET INPUTS AND PARSE
+#
+
+GetOptions("outpath=s"		=> \$outpath,
+	   "forwardprimerl=i"	=> \$primers{length}{forward},
+	   "reverseprimerl=i"	=> \$primers{length}{reverse},
+	   "fprimersequence=s"	=> \$primers{sequence}{forward},
+	   "rprimersequence=s"	=> \$primers{sequence}{reverse},
+	   "primersfile=s"	=> \$primers{sequence}{file},
+	   "stricttrim"		=> \$primers{sequence}{strict}
+	   "threads=i"		=> \$threads,
+	   "verbose"		=> \$verbose,
+	   "debug"		=> \$debug,
+	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
+
+# RUN HEADER
+
+foreach my $line (split '\n',$title){
+	print $line,"\n";
+	usleep($timer);
+}
+
+print "\nWelcome. This is $script version $version, started at $timedate.\n";
+
+print "$usage\n" and exit if($help);
+
+if($debug){
+	$verbose = 1;
+	print "\n#### Running in debug mode ####\n\n"
+}
+
+print "\nChecking your parameters...\n" if $verbose;
+
+# CHECK FOR INPUT FILES
+
+if(scalar @ARGV == 0){
+	if($debug){
+		warn "No input files, running for debug purposes only. There may be errors.\n";
+	} else {
+		die "I need me some files to work on, see \"$script --help\" for more information\n";
+	}
+}
+
+# CHECK TRIMMING
+
+my $trimtool = "cutadapt";
+die "Error: $trimtool not found, is it installed and in the PATH?\n" if(! which $trimtool);
+
+print "DEBUG: primers hash:\n", Dumper \%primers if $debug;
+
+if(defhash(\%{$primers{length}})){
+	die "Error: please specify either primer lengths or primer sequences for trimming, not both, see \"$script --help\" for more information\n" if defhash(\%{$primers{sequence}});
+	die "Error: you must specify the lengths of both forward and revers primers for length trimming, see \"$script --help\" for more information\n" unless ($primers{length}{forward} and $primers{length}{reverse});
+	print "Warning: primer trimming based on length is less accurate than trimming based on sequence. If you have the sequences, I suggest you use them\n";
+} elsif(defhash(\%{$primers{sequence}})){
+	if($primers{sequence}{file}){
+		die "Error: please specify either both primer sequences or the path to a file containing primer sequences, see \"$script --help\" for more information\n" if( $primers{sequence}{forward} or $primers{sequence}{reverse} );
+		$primers{sequence}{forward} = line($primers{sequence}{file},1) or die "Error: cannot read or parse primer file\n";
+		$primers{sequence}{reverse} = line($primers{sequence}{file},2) or die "Error: cannot read or parse primer file\n";
+	} else {
+		die "Error: please specify both forward and reverse primer sequences, see \"$script --help\" for more information\n" unless( $primers{sequence}{forward} and $primers{sequence}{reverse} );
+	}
+	print "Warning: you have not specified --stricttrim: reads with poor adapter matches will not be trimmed, but will be retained in the dataset. See \"$script --help\" for more information\n" unless $primers{sequence}{strict}
+} else {
+	die "Error: please specify some primer details, either lengths or sequences, see \"$script --help\" for more information\n";
+}
+
+# CHECK OUTPUT DIRECTORY
+
+if(!defined $outpath){
+	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
+} else {
+	make_path($outpath);
+}
+
+# VERIFY AND PAIR INPUT FILES
+
+print "\nChecking your files...\n" if $verbose;
+
+my @files=@ARGV;
+
+my %paired_files = find_pairs(@files);
+my $n_file_pairs = keys %paired_files;
+
+######################################################
+# SET UP ITERATIONS
+#
+
+print "\nParsing iterations...\n" if $verbose;
+
+print "DEBUG: Input parameters:\n",Dumper \%parameters if $debug;
+
+my $iterations = parse_parameters(\%parameters,sort keys %paired_files);
+
+print "DEBUG: Parsed iterations:\n", Dumper $iterations if $debug;
+
+printf "\n$script will run %d iterations on each of %d file pairs\n", scalar keys %$iterations, scalar keys %paired_files;
+
+
+######################################################
+# RUN TRIMMING
+#
+
+make_path("$outpath/trim");
+
+# INITIALISE FORKER AND VARIABLES
+
+my $tpm = Parallel::ForkManager->new($threads);
+my $done_trims=0;
+my %trim_log;
+
+# SET UP COMPLETION CLEANER
+
+$tpm->run_on_finish( sub {
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	$done_trims++;
+	printf "Completed trimming $done_trims/%d file pairs\r", scalar keys %paired_files;
+	my $name = $data_structure_reference->{name};
+	$trim_log{$name} = $data_structure_reference->{result};
+});
+
+# DO TRIMMING
+
+printf "\nTrimming %d file pairs using $threads threads\n", scalar keys %paired_files if $verbose;
+
+foreach my $name (keys %paired_files){
+	my $pid = $tpm->start and next;
+	
+	my $out = trim($trimtool,\%paired_files,$name,\%primers,$outpath);
+	
+	$tpm->finish(0, {result => $out, name => $name});
+}
+
+# FINALISE
+
+$tpm->wait_all_children;
+print "\n";
+print "DEBUG: trim log:\n", Dumper \%trim_log, "\n" if $debug;
+
+######################################################
+# DO LOG OUTPUT
+#
+
+
+#Do logging
+open my $log, '>', "$outpath/trim.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
+
+print $log join(',',('readname' , 'iteration' ,'Input_reads','Pairs_untrimmed_removed')),"\n";
+
+foreach my $iter (sort keys %$iterations){
+	foreach my $name (sort keys %paired_files){
+		print $log join(',', ($name,$iter,$trim_log{$name})),"\n";
+	}
+}
+
+close $log;
+
+print "\nDone: CSV log of read processing written\n";
+
+exit;
+
+sub trim {
+	# Load variables
+	my ($trimtool,$pairs,$name,$primers,$outpath) = @_;
+	my $cutspec;
+	
+	# Start log line
+	my $log;
+	
+	# Create command
+	if(defhash(${$primers}{length})){
+		print "Trimming file pair $name based on primer lengths\n" if $verbose;
+		$cutspec = "-u ${$primers}{length}{forward} -U ${$primers}{length}{reverse}";
+	} else {
+		print "Trimming file pair $name based on primer sequences\n" if $verbose;
+		$cutspec = "-g ${$primers}{sequence}{forward} -G ${$primers}{sequence}{reverse}";
+		$cutspec .= " --discard-untrimmed" if ${$primers}{sequence}{strict};
+	}
+	
+	my $trim_cmd = "$trimtool $cutspec --minimum-length 1 --pair-filter any -o $outpath/trim/$name\_R1.fq -p $outpath/trim/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
+	
+	# Run command
+	print "DEBUG: $trimtool command:\n$trim_cmd\n" if $debug;
+	
+	my $trim_log = `$trim_cmd`;
+	
+	print "DEBUG: $trimtool log:\n$trim_log\n" if $debug;
+	
+	# Parse log
+	$trim_log =~ /Total read pairs processed:[^\d]+(\d{1,3}(?:,\d{3})*)[^\d].*\(passing filters\):[^\d]+(\d{1,3}(?:,\d{3})*)[^\d]/s;
+	my @trim_parse = ($1,$2);
+	map { s/,//g; } @trim_parse;
+	$trim_parse[1] = $trim_parse[0] - $trim_parse[1];
+	$log = join ",",@trim_parse;
+	
+	# Finish
+	return $log;
+}
+
+sub merge_iteration {
+	# Load variables
+	my ($mergetool, $filtertool, $iterations, $iter, $name, $outpath, $it_threads) = @_;
+	
+	# Start log line
+	my $log = ${$iterations}{$iter}{pearquality};
+	
+	# MERGING
+	
+	print "Running $mergetool on file $name for iteration $iter with quality threshold ${$iterations}{$iter}{pearquality}\n" if $verbose;
+	
+	# Create command
+	my $merge_cmd = "$mergetool -f $outpath/trim/$name\_R1.fq -r $outpath/trim/$name\_R2.fq -o $outpath/merge_$iter/$name -q ${$iterations}{$iter}{pearquality} -j $it_threads 2>/dev/null";
+	
+	# Run command
+	print "DEBUG: $mergetool command:\n$merge_cmd\n" if $debug;
+	
+	my $merge_log = `$merge_cmd`;
+	
+	print "DEBUG: $mergetool log:\n$merge_log\n" if $debug;
+	
+	# Parse log
+	$merge_log =~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s;
+	
+	my @merge_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
+	foreach my $e (@merge_parse){
+		$e =~ s/,//g;
+		$log .= ",$e";
+	}
+	
+	# FILTERING
+	
+	if (${$iterations}{$iter}{noconvert} eq "true"){
+		
+		# Do logging
+		$log .= ",NA,NA,NA,NA\n";
+		
+		# Move results of merging to output directory
+		my $outdir = $outpath;
+		if(scalar keys %$iterations > 1){
+			$outdir .= "/NAPmerged_iteration$iter";
+			make_path($outdir);
+		}
+		move "$outpath/merge_$iter/$name.assembled.fastq", "$outdir/$name.fq";
+		
+	} else {
+		make_path("$outpath/rename_$iter");
+		
+		print "Running $filtertool fastq_filter on file $name for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
+		
+		# Do logging
+		$log .= ",${$iterations}{$iter}{eemax}";
+		
+		# Create command
+		my $filter_cmd = "$filtertool -fastq_filter $outpath/merge_$iter/$name.assembled.fastq -fastaout $outpath/filter_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
+		
+		# Run command
+		print "DEBUG: fastq_filter command:\n$filter_cmd\n" if $debug;
+		my $filter_log = `$filter_cmd`; 
+		
+		print "DEBUG: fastq_filter log:\n$filter_log\n" if $debug;
+		
+		# Parse log
+		$filter_log=~ /.*\s(\d*)\s\sReads.*\s(\d*)\s\sDiscarded.*\s(\d*)\s\sFiltered.*/s; #regex to extract data
+		my @filter_parse = ($1,$2,$3);
+		foreach my $e (@filter_parse){
+			$e =~ s/,//g;
+			$log .= ",$e";
+		}
+		
+		# HEADER RENAMING
+		my $readlabelcmd = "sed -e \"s/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=$name;/\" $outpath/filter_$iter/$name.fa > $outpath/rename_$iter/$name.fa"; #Append sample name to reads within paired read file. note the double escaping for sed expression within quoted string
+		system($readlabelcmd);
+		
+	}
+	
+	remove_tree("$outpath/merge_$iter","$outpath/filter_$iter") unless $debug;
+	
+	# Finish
+	return $log;
+}
+
+sub parse_parameters {
+	my ($inparams,@names) = @_;
+	my @itarray;
+	my @paramarray;
+#	push @paramarray, "name";
+#	push @itarray, \@names;
+	foreach my $param (keys %$inparams){
+		push @paramarray, $param;
+		if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
+			my @values;
+			my $curmax = $1;
+			while ($curmax <= $3){
+				push @values, $curmax;
+				$curmax += $5;
+			}
+			push @itarray, \@values;
+		} elsif($inparams->{$param} =~ /^[a-zA-Z]+(?:,[a-zA-Z]+)+$/){
+			my @values = split ',',$inparams->{$param};
+			push @itarray, \@values;
+		} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
+			push @itarray, [$inparams->{$param}];
+		} else {
+			die "Could not successfully parse string given for $param\n";
+		}
+	}
+	my @allarray;
+	
+	NestedLoops(\@itarray, sub {push @allarray, [ @_ ]});
+	
+	my %iterhash;
+	foreach my $it (0 .. $#allarray){
+		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
+	}
+	return \%iterhash;
+}
+
+sub line {
+	my ($path,$line) = @_;
+	open my $fh, '<', $path;
+	while (<$fh>) {
+		chomp $_;
+		return $_ if $. == $line;
+	}
+}
+
+sub find_pairs {
+	my @allfiles = @_;
+	my %filepairs;
+	foreach my $file (@allfiles){
+	    my ($file_name,$dir)=fileparse($file);
+	    if($file_name =~ /(.+)_R([1|2])/){
+		$filepairs{$1}[$2-1]=$file;
+	    }else{
+		die "Input file $file does not contain '_R1' or '_R2' in name";
+	    }
+	}
+	return %filepairs;
+}
+
+sub defhash{
+	my ($hash) = @_;
+	return any { defined ${$hash}{$_} } keys %{$hash};
+}
+
+sub timestamp{
+my @time = localtime;
+return sprintf "%02d:%02d:%02d",$time[2],$time[1],$time[0];
+}
+
+sub datestamp{
+my @time = localtime;
+return sprintf "%04d-%02d-%02d",$time[5]+1900,$time[4]+1,$time[3];
+}
