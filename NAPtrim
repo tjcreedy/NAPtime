@@ -261,7 +261,7 @@ sub trim {
 		$cutspec .= " --discard-untrimmed" if ${$primers}{sequence}{strict};
 	}
 	
-	my $trim_cmd = "$trimtool $cutspec --minimum-length 1 --pair-filter any -o $outpath/trim/$name\_R1.fq -p $outpath/trim/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
+	my $trim_cmd = "$trimtool $cutspec --minimum-length 1 --pair-filter any -o $outpath/$name\_R1.fq -p $outpath/$name\_R2.fq ${$pairs}{$name}[0] ${$pairs}{$name}[1]";
 	
 	# Run command
 	print "DEBUG: $trimtool command:\n$trim_cmd\n" if $debug;
