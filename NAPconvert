@@ -1,0 +1,301 @@
+#!/usr/bin/env perl
+#By Thomas J Creedy, thomas@tjcreedy.co.uk
+
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use File::Which;
+use List::Util qw(all any max); 
+use Algorithm::Loops qw(NestedLoops);
+use Parallel::ForkManager;
+use Time::HiRes qw(usleep);
+use Cwd qw(cwd);
+use Data::Dumper;
+
+########################################################
+# INITIALISE VARIABLES AND SET DEFAULTS
+#
+
+my $version = "0.0.1"; #20/03/2019
+my $help;
+my @files;
+my $outpath;
+my %parameters;
+our $verbose;
+my $threads = 1;
+our $debug;
+
+my $script = basename($0,());
+
+# CREATE HELPFILE
+
+my $usage =<<USAGE;
+
+Description:
+
+	This is $script version $version of the NGS Amplicon Pipeline. It takes in one or more fastq files and runs usearch110 fastq_filter on each, converting them into fasta files according to the specified maxee parameter (passed to -eemax).
+	
+	The headers of each output file are renamed to include the file name as a barcodelabel tag, and the output files are concatenated together to form a single fasta. Both the individual renamed and concatenated fasta are output.
+	
+	The script can run with the eemax parameter specified with a single value, in which case it outputs a fasta for each fastq file, or if parameter ranges are specified it will loop through every combination of all parameters and outputs a directory containing the fastas for each unique parameter. Multiple concatenated fastas will also be produced if iterating.A csv log file is output.
+	
+	For more information, see https://github.com/tjcreedy/NAPtime/wiki/NAPconvert
+
+Usage:
+
+	Basic
+	$script -input file.fq [file2.fq file3.fq] -output <dir> -eemax <n> [-threads <n>] [-verbose]
+	
+	Parameter exploration mode
+	$script -input file.fq [file2.fq file3.fq] -output <dir> -eemax <n-n/n> [-threads <n>] [-v]
+
+Arguments:
+
+	          input:  One or more fastq files to convert to fasta.
+	        outpath:  Path to a directory in which output files and the log table are written.
+	          eemax:  A value or range to pass to USEARCH110 fastq_filter as a -fastq_maxee option
+	        threads:  Number of CPU threads to use. Default 1.
+	        verbose:  Reports on progress.
+	           help:  Prints out this helpful message.
+
+USAGE
+
+# SET UP HEADER
+
+my $timedate = timestamp()." ".datestamp();
+my $timer = "100000";
+my $title =<<TITLE;
+  _   _          _____  _   _                 
+ | \\ | |   /\\   |  __ \\| | (_)                
+ |  \\| |  /  \\  | |__) | |_ _ _ __ ___   ___  
+ | . ` | / /\\ \\ |  ___/| __| | '_ ` _ \\ / _ \\ 
+ | |\\  |/ ____ \\| |    | |_| | | | | | |  __/ 
+ |_| \\_/_/    \\_\\_|     \\__|_|_| |_| |_|\\___| 
+TITLE
+
+
+######################################################
+# GET INPUTS AND PARSE
+#
+
+GetOptions("input=s{0,}"	=> \@files,
+	   "outpath=s"		=> \$outpath,
+	   "eemax=s"		=> \$parameters{eemax},
+	   "threads=i"		=> \$threads,
+	   "verbose"		=> \$verbose,
+	   "debug"		=> \$debug,
+	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
+
+# RUN HEADER
+
+foreach my $line (split '\n',$title){
+	print $line,"\n";
+	usleep($timer);
+}
+
+print "\nWelcome. This is $script version $version, started at $timedate.\n";
+
+print "$usage\n" and exit if($help);
+
+if($debug){
+	$verbose = 1;
+	print "\n#### Running in debug mode ####\n\n"
+}
+
+print "\nChecking your parameters...\n" if $verbose;
+
+# CHECK FOR INPUT FILES
+
+if(scalar @files == 0){
+	if($debug){
+		warn "No input files, running for debug purposes only. There may be errors.\n";
+	} else {
+		die "I need me some files to work on, see \"$script --help\" for more information\n";
+	}
+}
+
+# CHECK CONVERSION
+
+my $converttool = "usearch110";
+
+die "Error: $converttool not found, is it installed and in the PATH?\n" if(! which $converttool);
+die "Error: please specify --eemax, see \"$script --help\" for more information\n" if(!defined $parameters{eemax});
+
+# CHECK OUTPUT DIRECTORY
+
+if(!defined $outpath){
+	die "Error: output directory must be specified, see \"$script --help\" for more information\n";
+} else {
+	make_path($outpath);
+}
+
+
+######################################################
+# SET UP ITERATIONS
+#
+
+print "\nParsing iterations...\n" if $verbose;
+
+print "DEBUG: Input parameters:\n",Dumper \%parameters if $debug;
+
+my $iterations = parse_parameters(\%parameters);
+
+print "DEBUG: Parsed iterations:\n", Dumper $iterations if $debug;
+
+printf "\n$script will run %d iterations on each of %d file pairs\n", scalar keys %$iterations, scalar @files;
+
+
+######################################################
+# RUN CONVERSION
+#
+
+# INITIALISE FORKER AND VARIABLES
+
+my $cpm = Parallel::ForkManager->new($threads);
+my $done_iterations=0;
+my %convert_log;
+my $total =  (scalar keys %$iterations) * (scalar @files);
+my $it_threads = int($threads/$total);
+$it_threads = 1 if($it_threads < 1);
+
+# SET UP COMPLETION CLEANER
+
+$cpm->run_on_finish( sub {
+	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
+	$done_iterations++;
+	print "Completed $done_iterations/$total merging and filtering iterations\r";
+	my $iter = $data_structure_reference->{iter};
+	my $file = $data_structure_reference->{file};
+	$convert_log{$iter}{$file} = $data_structure_reference->{result};
+});
+
+# DO CONVERSION
+
+printf "\nStarting %d conversion iterations using $threads threads\n", scalar keys %$iterations if $verbose;
+
+foreach my $iter (keys %$iterations){
+	make_path("$outpath/convert_$iter", "$outpath/rename_$iter");
+	foreach my $file (@files){
+		my $pid = $cpm->start and next;
+		
+		my $out = convert($converttool,$iterations,$iter,$file,$outpath,$it_threads);
+		
+		$cpm->finish(0, {result => $out, iter => $iter, file => $file});
+	}
+	remove_tree("$outpath/convert_$iter") unless $debug;
+	my $concatcmd = "cat $outpath/rename_$iter/*.fa > $outpath/all_rename_$iter.fa";
+	system($concatcmd);
+}
+
+# FINALISE
+
+$cpm->wait_all_children;
+print "\n";
+print "DEBUG: convert log:\n", Dumper \%convert_log, "\n" if $debug;
+
+######################################################
+# DO LOG OUTPUT
+#
+
+
+#Do logging
+open my $log, '>', "$outpath/convert.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
+
+print $log join(',',('seqname' , 'iteration' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted')),"\n";
+
+foreach my $iter (sort keys %$iterations){
+	foreach my $file (sort @files){
+		print $log join(',', ($file,$iter,$convert_log{$iter}{$file})),"\n";
+	}
+}
+
+close $log;
+
+print "\nDone: CSV log of read processing written\n";
+
+exit;
+
+sub convert {
+	# Load variables
+	my ($converttool, $iterations, $iter, $file, $outpath, $it_threads) = @_;
+	
+	my $name = basename($file, ());
+	
+	# CONVERSION
+	
+	print "Running $converttool fastq_filter on file $file for iteration $iter with eemax ${$iterations}{$iter}{emax}\n" if $verbose;
+	
+	# Do logging
+	my $log = ",${$iterations}{$iter}{eemax}";
+	
+	# Create command
+	my $convert_cmd = "$converttool -fastq_filter $file -fastaout $outpath/convert_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
+	
+	# Run command
+	print "DEBUG: fastq_filter command:\n$convert_cmd\n" if $debug;
+	my $convert_log = `$convert_cmd`; 
+	
+	print "DEBUG: fastq_filter log:\n$convert_log\n" if $debug;
+	
+	# Parse log
+	$convert_log =~ /.*\s(\d*)\s\sReads.*\s(\d*)\s\sDiscarded.*\s(\d*)\s\sFiltered.*/s; #regex to extract data
+	my @convert_parse = ($1,$2,$3);
+	foreach my $e (@convert_parse){
+		$e =~ s/,//g;
+		$log .= ",$e";
+	}
+	
+	# HEADER RENAMING
+	
+	my $readlabelcmd = "sed -e \"s/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=$name;/\" $outpath/convert_$iter/$name.fa> $outpath/rename_$iter/$name.fa"; #Append sample name to reads within paired read file. note the double ecaping for sed expression within quoted string
+	system($readlabelcmd);
+	
+	# Finish
+	return $log;
+}
+
+sub parse_parameters {
+	my ($inparams) = @_;
+	my @itarray;
+	my @paramarray;
+	foreach my $param (keys %$inparams){
+		push @paramarray, $param;
+		if ($inparams->{$param} =~ /^(\d+(\.\d+)?)-(\d+(\.\d+)?),(\d+(\.\d+)?)$/ ){
+			my @values;
+			my $curmax = $1;
+			while ($curmax <= $3){
+				push @values, $curmax;
+				$curmax += $5;
+			}
+			push @itarray, \@values;
+		} elsif($inparams->{$param} =~ /^[a-zA-Z]+(?:,[a-zA-Z]+)+$/){
+			my @values = split ',',$inparams->{$param};
+			push @itarray, \@values;
+		} elsif($inparams->{$param} =~ /^[a-zA-Z]+$|^\d+(\.\d+)?$/){
+			push @itarray, [$inparams->{$param}];
+		} else {
+			die "Could not successfully parse string given for $param\n";
+		}
+	}
+	my @allarray;
+	
+	NestedLoops(\@itarray, sub {push @allarray, [ @_ ]});
+	
+	my %iterhash;
+	foreach my $it (0 .. $#allarray){
+		$iterhash{$it+1} = {map { $paramarray[$_] => $allarray[$it][$_] } 0..$#paramarray};
+	}
+	return \%iterhash;
+}
+
+sub timestamp{
+my @time = localtime;
+return sprintf "%02d:%02d:%02d",$time[2],$time[1],$time[0];
+}
+
+sub datestamp{
+my @time = localtime;
+return sprintf "%04d-%02d-%02d",$time[5]+1900,$time[4]+1,$time[3];
+}
