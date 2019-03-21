@@ -176,7 +176,7 @@ $cpm->run_on_finish( sub {
 printf "\nStarting %d conversion iterations using $threads threads\n", scalar keys %$iterations if $verbose;
 
 foreach my $iter (keys %$iterations){
-	make_path("$outpath/convert_$iter", "$outpath/rename_$iter");
+	make_path("$outpath/convert_$iter");
 	foreach my $file (@files){
 		my $pid = $cpm->start and next;
 		
@@ -184,15 +184,19 @@ foreach my $iter (keys %$iterations){
 		
 		$cpm->finish(0, {result => $out, iter => $iter, file => $file});
 	}
-	remove_tree("$outpath/convert_$iter") unless $debug;
-	my $concatcmd = "cat $outpath/rename_$iter/*.fa > $outpath/all_rename_$iter.fa";
-	system($concatcmd);
+#	remove_tree("$outpath/convert_$iter") unless $debug;
 }
 
 # FINALISE
 
 $cpm->wait_all_children;
 print "\n";
+
+foreach my $iter (keys %$iterations){
+	my $concatcmd = "cat $outpath/convert_$iter/*.fa > $outpath/all_rename_$iter.fa";
+	system($concatcmd);
+}
+
 print "DEBUG: convert log:\n", Dumper \%convert_log, "\n" if $debug;
 
 ######################################################
@@ -207,7 +211,8 @@ print $log join(',',('seqname' , 'iteration' ,'Max_expected_E-value', 'Filter_to
 
 foreach my $iter (sort keys %$iterations){
 	foreach my $file (sort @files){
-		print $log join(',', ($file,$iter,$convert_log{$iter}{$file})),"\n";
+		(my $name = $file) =~ s/\.assembled\.fastq$//;
+		print $log join(',', ($name,$iter,$convert_log{$iter}{$file})),"\n";
 	}
 }
 
@@ -222,6 +227,8 @@ sub convert {
 	my ($converttool, $iterations, $iter, $file, $outpath, $it_threads) = @_;
 	
 	my $name = basename($file, ());
+	
+	my $name =~ s/\.assembled\.fastq$//;
 	
 	# CONVERSION
 	
@@ -249,7 +256,7 @@ sub convert {
 	
 	# HEADER RENAMING
 	
-	my $readlabelcmd = "sed -e \"s/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=$name;/\" $outpath/convert_$iter/$name.fa> $outpath/rename_$iter/$name.fa"; #Append sample name to reads within paired read file. note the double ecaping for sed expression within quoted string
+	my $readlabelcmd = "sed -i -e \"s/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=$name;/\" $outpath/convert_$iter/$name.fa"; #Append sample name to reads within paired read file. note the double ecaping for sed expression within quoted string
 	system($readlabelcmd);
 	
 	# Finish
