@@ -18,7 +18,7 @@ use Data::Dumper;
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.0.1"; #20/03/2019
+my $version = "0.0.2"; #21/03/2019
 my $help;
 my @files;
 my $outpath;
@@ -225,7 +225,7 @@ sub convert {
 	
 	# CONVERSION
 	
-	print "Running $converttool fastq_filter on file $file for iteration $iter with eemax ${$iterations}{$iter}{emax}\n" if $verbose;
+	print "Running $converttool fastq_filter on file $file for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
 	
 	# Do logging
 	my $log = ",${$iterations}{$iter}{eemax}";
