@@ -212,7 +212,7 @@ print $log join(',',('seqname' , 'iteration' ,'Max_expected_E-value', 'Filter_to
 foreach my $iter (sort keys %$iterations){
 	foreach my $file (sort @files){
 		(my $name = $file) =~ s/\.assembled\.fastq$//;
-		print $log join(',', ($name,$iter,$convert_log{$iter}{$file})),"\n";
+		print $log "$name,$iter$convert_log{$iter}{$file}\n";
 	}
 }
 
@@ -228,7 +228,7 @@ sub convert {
 	
 	my $name = basename($file, ());
 	
-	my $name =~ s/\.assembled\.fastq$//;
+	$name =~ s/\.assembled\.fastq$//;
 	
 	# CONVERSION
 	
@@ -250,8 +250,12 @@ sub convert {
 	$convert_log =~ /.*\s(\d*)\s\sReads.*\s(\d*)\s\sDiscarded.*\s(\d*)\s\sFiltered.*/s; #regex to extract data
 	my @convert_parse = ($1,$2,$3);
 	foreach my $e (@convert_parse){
-		$e =~ s/,//g;
-		$log .= ",$e";
+		if($e){
+			$e =~ s/,//g;
+			$log .= ",$e";
+		} else {
+			$log .= ",0";
+		}
 	}
 	
 	# HEADER RENAMING
