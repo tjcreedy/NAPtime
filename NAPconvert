@@ -18,7 +18,7 @@ use Data::Dumper;
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.0.2"; #21/03/2019
+my $version = "0.0.3"; #24/03/2019
 my $help;
 my @files;
 my $outpath;
@@ -226,42 +226,48 @@ sub convert {
 	# Load variables
 	my ($converttool, $iterations, $iter, $file, $outpath, $it_threads) = @_;
 	
-	my $name = basename($file, ());
-	
-	$name =~ s/\.assembled\.fastq$//;
-	
-	# CONVERSION
-	
-	print "Running $converttool fastq_filter on file $file for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
-	
-	# Do logging
-	my $log = ",${$iterations}{$iter}{eemax}";
-	
-	# Create command
-	my $convert_cmd = "$converttool -fastq_filter $file -fastaout $outpath/convert_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
-	
-	# Run command
-	print "DEBUG: fastq_filter command:\n$convert_cmd\n" if $debug;
-	my $convert_log = `$convert_cmd`; 
-	
-	print "DEBUG: fastq_filter log:\n$convert_log\n" if $debug;
-	
-	# Parse log
-	$convert_log =~ /.*\s(\d*)\s\sReads.*\s(\d*)\s\sDiscarded.*\s(\d*)\s\sFiltered.*/s; #regex to extract data
-	my @convert_parse = ($1,$2,$3);
-	foreach my $e (@convert_parse){
-		if($e){
-			$e =~ s/,//g;
-			$log .= ",$e";
-		} else {
-			$log .= ",0";
+	if(-z $file){
+		my $name = basename($file, ());
+		
+		$name =~ s/\.assembled\.fastq$//;
+		
+			# CONVERSION
+		
+		print "Running $converttool fastq_filter on file $file for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
+		
+		# Do logging
+		my $log = ",${$iterations}{$iter}{eemax}";
+		
+		# Create command
+		my $convert_cmd = "$converttool -fastq_filter $file -fastaout $outpath/convert_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
+		
+		# Run command
+		print "DEBUG: fastq_filter command:\n$convert_cmd\n" if $debug;
+		my $convert_log = `$convert_cmd`; 
+		
+		print "DEBUG: fastq_filter log:\n$convert_log\n" if $debug;
+		
+		# Parse log
+		$convert_log =~ /.*\s(\d*)\s\sReads.*\s(\d*)\s\sDiscarded.*\s(\d*)\s\sFiltered.*/s; #regex to extract data
+		my @convert_parse = ($1,$2,$3);
+		foreach my $e (@convert_parse){
+			if($e){
+				$e =~ s/,//g;
+				$log .= ",$e";
+			} else {
+				$log .= ",0";
+			}
 		}
+		
+		# HEADER RENAMING
+		
+		my $readlabelcmd = "sed -i -e \"s/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=$name;/\" $outpath/convert_$iter/$name.fa"; #Append sample name to reads within paired read file. note the double ecaping for sed expression within quoted string
+		system($readlabelcmd);
+		
+	} else {
+		print "File $file is empty, conversion skipped\n" if $verbose;
+		$log .= ",0,0,0";
 	}
-	
-	# HEADER RENAMING
-	
-	my $readlabelcmd = "sed -i -e \"s/^>\\([^ ]*\\)\\(.*\\)/>\\1;barcodelabel=$name;/\" $outpath/convert_$iter/$name.fa"; #Append sample name to reads within paired read file. note the double ecaping for sed expression within quoted string
-	system($readlabelcmd);
 	
 	# Finish
 	return $log;
