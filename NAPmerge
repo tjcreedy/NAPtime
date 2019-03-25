@@ -93,7 +93,7 @@ TITLE
 # GET INPUTS AND PARSE
 #
 
-GetOptions("input=s"		=> \$input,
+GetOptions("input=s"		=> \@files,
 	   "outpath=s"		=> \$outpath,
 	   "pearquality=s"	=> \$parameters{pearquality},
 	   "threads=i"		=> \$threads,
@@ -201,7 +201,7 @@ foreach my $iter (keys %$iterations){
 	foreach my $name (keys %paired_files){
 		my $pid = $mpm->start and next;
 		
-		my $out = merge_iteration($mergetool$iterations,$iter,$name,$outpath,$it_threads);
+		my $out = merge_iteration($mergetool,$iterations,$iter,$name,$outpath,$it_threads);
 		
 		$mpm->finish(0, {result => $out, iter => $iter, name => $name});
 	}
