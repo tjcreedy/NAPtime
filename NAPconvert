@@ -156,6 +156,7 @@ printf "\n$script will run %d iterations on each of %d file pairs\n", scalar key
 my $cpm = Parallel::ForkManager->new($threads);
 my $done_iterations=0;
 my %convert_log;
+my %empty_check;
 my $total =  (scalar keys %$iterations) * (scalar @files);
 my $it_threads = int($threads/$total);
 $it_threads = 1 if($it_threads < 1);
@@ -168,6 +169,7 @@ $cpm->run_on_finish( sub {
 	print "Completed $done_iterations/$total merging and filtering iterations\r";
 	my $iter = $data_structure_reference->{iter};
 	my $file = $data_structure_reference->{file};
+	$empty_check{$iter} += (split(",", $data_structure_reference->{result}))[2];
 	$convert_log{$iter}{$file} = $data_structure_reference->{result};
 });
 
@@ -192,12 +194,18 @@ foreach my $iter (keys %$iterations){
 $cpm->wait_all_children;
 print "\n";
 
+print "DEBUG: empty_check values:\n", Dumper \%empty_check if $debug;
+
 foreach my $iter (keys %$iterations){
-	my $concatcmd = "cat $outpath/convert_$iter/*.fa > $outpath/all_rename_$iter.fa";
-	system($concatcmd);
+	if($empty_check{$iter}){
+		my $concatcmd = "cat $outpath/convert_$iter/*.fa > $outpath/all_rename_$iter.fa";
+		system($concatcmd);
+	} else {
+		warn "\nWARNING: All input files were empty, no concatenated output produced\n\n";
+	}
 }
 
-print "DEBUG: convert log:\n", Dumper \%convert_log, "\n" if $debug;
+print "DEBUG: convert log:\n", Dumper \%convert_log if $debug;
 
 ######################################################
 # DO LOG OUTPUT
@@ -207,7 +215,7 @@ print "DEBUG: convert log:\n", Dumper \%convert_log, "\n" if $debug;
 #Do logging
 open my $log, '>', "$outpath/convert.log.csv" or die "Error opening csv log for writing"; #open csv object for writing, and name
 
-print $log join(',',('seqname' , 'iteration' ,'Max_expected_E-value', 'Filter_total_reads' , 'Filter_discarded' , 'Filter_converted')),"\n";
+print $log join(',',('seqname' , 'iteration' ,'Max_expected_E-value', 'Filter_input_reads' , 'Filter_discarded' , 'Filter_converted')),"\n";
 
 foreach my $iter (sort keys %$iterations){
 	foreach my $file (sort @files){
@@ -226,17 +234,17 @@ sub convert {
 	# Load variables
 	my ($converttool, $iterations, $iter, $file, $outpath, $it_threads) = @_;
 	
-	if(-z $file){
+	# Do logging
+	my $log = ",${$iterations}{$iter}{eemax}";
+	
+	if(! -z $file){
 		my $name = basename($file, ());
 		
 		$name =~ s/\.assembled\.fastq$//;
 		
-			# CONVERSION
+		# CONVERSION
 		
 		print "Running $converttool fastq_filter on file $file for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
-		
-		# Do logging
-		my $log = ",${$iterations}{$iter}{eemax}";
 		
 		# Create command
 		my $convert_cmd = "$converttool -fastq_filter $file -fastaout $outpath/convert_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
