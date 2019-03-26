@@ -50,6 +50,7 @@ our $threads = 1;
 our $blastpath;
 our $verbose;
 our $debug;
+our $fastdebug;
 
 my $script = basename($0,());
 
@@ -104,6 +105,7 @@ GetOptions("output=s"		=> \$outpath,
 	   "threads=i"		=> \$threads,
 	   "blastpath=s"	=> \$blastpath,
 	   "verbose"		=> \$verbose,
+	   "fastdebug"		=> \$fastdebug,
 	   "debug"		=> \$debug,
 	   "help"		=> \$help) or die "Error: Incorrect options, try \"$script --help\" for more information.\n";
 
@@ -118,12 +120,16 @@ print "\nWelcome. This is $script version $version, started at $timedate.\n";
 
 print "$usage\n" and exit if($help);
 
+$debug = 1 if $fastdebug;
+
 if($debug){
 	$verbose = 1;
 	print "\n#### Running in debug mode ####\n\n";
-	$parameters{bootstraps} = 10;
-	$parameters{blasthits} = 10;
-	print "Debug mode has reset the number of bootstraps and blasthits to 10\n";
+	if($fastdebug){
+		$parameters{bootstraps} = 10;
+		$parameters{blasthits} = 10;
+		print "Fast debug mode has reset the number of bootstraps and blasthits to 10\n";
+	}
 }
 
 print "\nChecking your parameters...\n" if $verbose;
@@ -187,7 +193,8 @@ if($blastskip){
 	}
 	
 	#Set BLAST threads
-	$blastthreads = floor($threads /scalar @files) if(scalar @files < $threads)
+	$blastthreads = $threads;
+#	$blastthreads = int($threads /scalar @files) if(scalar @files < $threads)
 }
 
 # CHECK OUTPUT DIRECTORY
@@ -266,7 +273,7 @@ my %stats = (
 #
 
 # ITITIALISE FORKER AND VARIABLES
-
+$threads = 1;
 my $pm = Parallel::ForkManager->new($threads);
 my $done_iterations;
 
@@ -279,12 +286,17 @@ $pm->run_on_finish( sub {
 	
 	my $iter = $data_structure_reference->{iter};
 	my $file = $data_structure_reference->{file};
-	$log{$iter}{$file} = $data_structure_reference->{result};
+	
+	if($iter and $file){
+		$log{$iter}{$file} = $data_structure_reference->{result};
+	} else {
+		die "Error completing iteration. Probably failed in an NCBI call somewhere\n";
+	}
 });
 
 # DO DEREPLICATION, FILTERING AND SELECTION
 
-printf "\nStarting %d filtering iterations using $threads threads:\n", (scalar keys %$iterations)*(scalar @files);
+printf "\nStarting %d filtering iterations\n", (scalar keys %$iterations)*(scalar @files);
 
 foreach my $file (@files){
 	foreach my $iter (keys %$iterations){;
@@ -310,6 +322,9 @@ print "\n" unless $verbose;
 open my $logcsv, '>', "$outpath/select.log.csv";
 my @head = (@{$stats{general}},@params,@{$stats{group}},@{$stats{filter}});
 print $logcsv join(',',@head);
+
+
+print "Debug: Report hash follows:\n", Dumper \%log if $debug;
 
 # LOOP ON ITERATION
 
@@ -381,7 +396,7 @@ sub read_derep_filter_select{
 	# Print message
 	
 	print timestamp(),": $printstring dereplicating" if $verbose; 
-	if($nex > 0){
+	if($nex > 0 and $verbose){
 		print " and filtering out sequences";
 		if($minl){
 			print " shorter than $minl";
@@ -535,8 +550,9 @@ sub select_sequence{
 				# Significantly distinct
 				print timestamp(),": $printstring sequence $selection significantly distinct. This sequence will be considered with high confidence\n" if $verbose;
 				$confidence = "high";
-				
 			}
+		} else {
+			$pvalue = 'NA';
 		}
 		
 		# STEP 2: DO BLASTING TO ASSESS TAXONOMY
@@ -545,7 +561,7 @@ sub select_sequence{
 		my $blastz;
 		my $select_rank;
 		
-		if($confidence eq "high"){
+		if($confidence && $confidence eq "high"){
 			$blastq = $sorted_seq[0];
 			$blastz = $sorted_size[0];
 			$select_rank = $selection;
@@ -596,7 +612,7 @@ sub select_sequence{
 		
 		# STEP 4: MERGE SEQUENCES IF NECESSARY
 		
-		if(($pvalue < ${$specs}{pvalue_maxthreshold} and $pvalue > ${$specs}{pvalue}) or $blastfail){
+		if((!$bootstrapskip && ($pvalue < ${$specs}{pvalue_maxthreshold} and $pvalue > ${$specs}{pvalue})) or $blastfail){
 			
 			# First check if more than one group left or if we've already discarded too many groups
 			if(scalar @sorted_seq == 1 or $selection >= ${$specs}{maxgroupscheck}){  
@@ -612,7 +628,7 @@ sub select_sequence{
 					print timestamp(),": $printstring sequence $selection not sufficiently distinct and/or no further sequences exist. The most frequent sequence will be considered, but will be written to lowconfidence output.\n" if $verbose;
 					$confidence = "low";
 					$bootstrapskip = 1;
-					continue;
+					next;
 				}
 			}
 			
@@ -664,7 +680,7 @@ sub bootstrap{
 		$nsuccesses++ if(max(values %grp) > $max);
 		#print "Bootstrapping results:\n" if $debug;
 		#print Dumper \%grp if $debug; 
-		print "Number of successes = $nsuccesses\n" if $debug;
+		print "Number of successes = $nsuccesses\n" if $fastdebug;
 	}
 	return $nsuccesses/$boots;
 }
@@ -700,7 +716,7 @@ sub taxonomyblast{
 	
 	my @out;
 	if($blastdump){
-		print "BLAST successfully output data.\n";
+		print "BLAST successfully output data.\n" if $verbose;
 		
 		# Parse accessions
 		my @accessions = ($blastdump =~ /(?:^|\n)(\w+)/g);
@@ -710,25 +726,42 @@ sub taxonomyblast{
 		
 		# Retrieve NCBI data
 		if($naccessions>1){
-			# Retrieve taxid data
+			# Set up ncbi pull command
 			
-			my $url  = "http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta";
-			print "EUTILS url:\n$url\n" if $debug;
-			my $nucdump = get($url) or die "Error: failed to recover taxonomy information for accessions from NCBI";
-			#my $url_pull = $browser->get($url);
-			#print Dumper $url_pull;
+			my $nucurl  = "http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=$accessionstring&retmode=xml&rettype=fasta";
+			print "EUTILS url:\n$nucurl\n" if $debug;
+			
+			# Do URL pull
+			
+			my $nucdump;
+			my $nuctries = 0;
+			while(!$nucdump && $nuctries<5){
+				$nucdump = get($nucurl);
+				$nuctries++;
+				print "NCBI pull attempt $nuctries\n" if $debug;
+			}
+			
+			die "Error: cannot pull from NCBI after 5 tries!\n" unless $nucdump;
 			
 			# Parse out taxids
 			
-			#my $nucdump = $url_pull->content;
-			print $nucdump;
 			my $taxidstring = join ",",($nucdump =~ /<TSeq_taxid>(.*)<\/TSeq_taxid/g);
-	#		print $taxidstring,"\n";
 			print "Taxids recovered:\n$taxidstring\n" if $debug;
 			
 			# Retrieve taxonomy data
 			
-			my $taxdump = get("http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring");
+			my $taxurl = "http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=taxonomy&id=$taxidstring";
+			print "Taxonomy url:\n$taxurl\n" if $debug;
+			
+			my $taxdump;
+			my $taxtries = 0;
+			while(!$taxdump && $taxtries<5){
+				$taxdump = get($taxurl);
+				$taxtries++;
+				print "Taxonomy pull attempt $taxtries\n" if $debug;
+			}
+			
+			die "Error: cannot pull taxonomy after 5 tries!\n" unless $taxdump;
 			
 			# Parse out lineages
 			my @lineages = ($taxdump =~ /<Lineage>(.*)<\/Lineage>/g);
