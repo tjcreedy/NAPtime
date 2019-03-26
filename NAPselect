@@ -177,11 +177,11 @@ if($blastskip){
 	if($blastdbname eq "Nucleotide collection (nt)"){
 		die "Error, BLAST target must be specified\n" if(! $parameters{blasttarget});
 		print "Using Genbank $blastdbname database for taxonomic identification of sequences\n" if $verbose;
-		$parameters{blasthits} = 0 unless $parameters{blasthits};
+		$parameters{blastid} = 0 unless $parameters{blastid};
 	} else {
 		die "Error: custom blast database selected but BLAST target specified, custom databases cannot be parsed for taxonomy information\n	(If this is in error, let Thomas know)\n" if $parameters{blasttarget};
 		print "Using custom blast database $blastdbname, taxonomic identification will not be performed and sequences will be selected based on hit rate to $blastdbname\n" if $verbose;
-		$parameters{blasthist} = 97 unless $parameters{blasthits};
+		$parameters{blastid} = 97 unless $parameters{blastid};
 		$parameters{customdb} = 1;
 		$parameters{blasttarget} = 0;
 	}
