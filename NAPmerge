@@ -19,7 +19,7 @@ use Data::Dumper;
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.0.2"; #02/04/2019
+my $version = "0.0.3"; #02/04/2019
 my $help;
 my @files;
 my $outpath;
@@ -192,7 +192,7 @@ foreach my $iter (keys %$iterations){
 	foreach my $name (keys %paired_files){
 		my $pid = $mpm->start and next;
 		
-		my $out = merge_iteration($mergetool,$iterations,$iter,$name,$outpath,$it_threads);
+		my $out = merge_iteration($mergetool,$iterations,$iter,$name,\%paired_files,$outpath,$it_threads);
 		
 		$mpm->finish(0, {result => $out, iter => $iter, name => $name});
 	}
@@ -227,40 +227,51 @@ print "\nDone: CSV log of read processing written\n";
 exit;
 sub merge_iteration {
 	# Load variables
-	my ($mergetool, $filtertool, $iterations, $iter, $name, $outpath, $it_threads) = @_;
+	my ($mergetool, $iterations, $iter, $name, $pairs, $outpath, $it_threads) = @_;
 	
 	# Start log line
 	my $log = ${$iterations}{$iter}{pearquality};
 	
-	# MERGING
 	
-	print "Running $mergetool on $name for iteration $iter with quality threshold ${$iterations}{$iter}{pearquality}\n" if $verbose;
-	
-	# Create command
-	my $merge_cmd = "$mergetool -f $name\_R1.fq -r $name\_R2.fq -o $outpath/merge_$iter/$name -q ${$iterations}{$iter}{pearquality} -j $it_threads 2>/dev/null";
-	
-	# Run command
-	print "DEBUG: $mergetool command:\n$merge_cmd\n" if $debug;
-	
-	my $merge_log = `$merge_cmd`;
-	
-	print "DEBUG: $mergetool log:\n$merge_log\n" if $debug;
-	
-	# Parse log
-	$merge_log =~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s;
-	
-	my @merge_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
-	foreach my $e (@merge_parse){
-		$e =~ s/,//g;
-		$log .= ",$e";
+	if(! (-z ${$pairs}{$name}[0] and -z ${$pairs}{$name}[1])){
+		# MERGING
+		
+		print "Running $mergetool on $name for iteration $iter with quality threshold ${$iterations}{$iter}{pearquality}\n" if $verbose;
+		
+		# Create command
+		my $merge_cmd = "$mergetool -f ${$pairs}{$name}[0] -r ${$pairs}{$name}[1] -o $outpath/merge_$iter/$name -q ${$iterations}{$iter}{pearquality} -j $it_threads 2>/dev/null";
+		
+		# Run command
+		print "DEBUG: $mergetool command:\n$merge_cmd\n" if $debug;
+		
+		my $merge_log = `$merge_cmd`;
+		
+		print "DEBUG: $mergetool log:\n$merge_log\n" if $debug;
+		
+		# Parse log
+		$merge_log =~ /.*A:\s(\d.\d{6})\s*C:\s(\d.\d{6})\s*G:\s(\d.\d{6})\s*T:\s(\d.\d{6})\n\s*(\d*).*Assembled\sreads\s[\.]*:\s([\d|,]*)\s.*Discarded\sreads\s[\.]*:\s([\d|,]*)\s.*Not\sassembled\sreads\s[\.]*:\s([\d|,]*)\s\/\s([\d|,]*).*/s;
+		
+		my @merge_parse = ($1,$2,$3,$4,$5,$9,$6,$7,$8);
+		foreach my $e (@merge_parse){
+			if($e){
+				$e =~ s/,//g;
+				$log .= ",$e";
+			} else {
+				$log .= "NA";
+			}
+		}
+		
+		# Clean up
+		my $cleancmd = "rm $outpath/merge_$iter/$name.{unassembled,discarded}*";
+		system($cleancmd);
+		
+		my $renamecmd = "mv $outpath/merge_$iter/$name.assembled.fastq $outpath/merge_$iter/$name.fq";
+		system($renamecmd);
+		
+	} else {
+		print "One or both of $name files are empty, merging skipped\n" if $verbose;
+		$log .= ",NA,NA,NA,NA,NA,0,0,0,0";
 	}
-	
-	# Clean up
-	my $cleancmd = "rm $outpath/merge_$iter/$name.{unassembled,discarded}*";
-	sytem($cleancmd);
-	
-	my $renamecmd = "mv $outpath/merge_$iter/$name.assembled.fastq $outpath/merge_$iter/$name.fq";
-	system($renamecmd);
 	
 	# Finish
 	return $log;
