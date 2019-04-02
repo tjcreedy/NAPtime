@@ -19,7 +19,7 @@ use Data::Dumper;
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.0.3"; #02/04/2019
+my $version = "0.0.4"; #02/04/2019
 my $help;
 my @files;
 my $outpath;
@@ -44,6 +44,8 @@ Description:
 	$script wraps PEAR to carry out merging. You may set PEAR option -q using the -pearquality argument.
 	
 	Optionally, $script can iterate through multiple values for parameters (i.e. -pearquality). Specify parameter ranges as "a-b/c", where a is the starting value, c is the value by which this increments each iteration, and b is the maximum. Note that if the difference between b and a is not divisible exactly by c, the final value of the parameter range will be a+xc where x is the integer quotient of b/a. I.e. if the range 4-9/2 is given, $script will run 3 times using, in turn, the values 4, 6 then 8. Alternatively, values can be given in a custom range of the form "a,b,c" where the precise values to be used are separated by commas. All combinations of all supplied parameter ranges will be run and the results output in separate folders for each iteration (combination).
+	
+	Either way, a csv log file is output.
 	
 	For more information, see https://github.com/tjcreedy/NAPtime/wiki/NAPmerge
 
@@ -84,7 +86,7 @@ TITLE
 # GET INPUTS AND PARSE
 #
 
-GetOptions("input=s"		=> \@files,
+GetOptions("input=s{2,}"	=> \@files,
 	   "outpath=s"		=> \$outpath,
 	   "pearquality=s"	=> \$parameters{pearquality},
 	   "threads=i"		=> \$threads,
@@ -143,6 +145,7 @@ print "\nChecking your files...\n" if $verbose;
 my %paired_files = find_pairs(@files);
 my $n_file_pairs = keys %paired_files;
 
+
 ######################################################
 # SET UP ITERATIONS
 #
@@ -165,7 +168,7 @@ printf "\n$script will run %d iterations on each of %d file pairs\n", scalar key
 
 # INITIALISE FORKER AND VARIABLES
 
-my $mpm = Parallel::ForkManager->new($threads);
+my $mpm = Parallel::ForkManager->new(1);
 my $done_iterations=0;
 my %merge_log;
 my $total =  (scalar keys %$iterations) * (scalar keys %paired_files);
@@ -203,6 +206,14 @@ foreach my $iter (keys %$iterations){
 $mpm->wait_all_children;
 print "\n";
 print "DEBUG: merge log:\n", Dumper \%merge_log, "\n" if $debug;
+
+# MOVE FILES IF ONLY ONE ITERATION
+
+if(scalar keys %$iterations == 1){
+	move "$outpath/merge_1/$_.fq", "$outpath/$_.fq" for keys %paired_files;
+	remove_tree("$outpath/merge_1/");
+}
+
 
 ######################################################
 # DO LOG OUTPUT
@@ -257,16 +268,13 @@ sub merge_iteration {
 				$e =~ s/,//g;
 				$log .= ",$e";
 			} else {
-				$log .= "NA";
+				$log .= ",NA";
 			}
 		}
 		
 		# Clean up
-		my $cleancmd = "rm $outpath/merge_$iter/$name.{unassembled,discarded}*";
-		system($cleancmd);
-		
-		my $renamecmd = "mv $outpath/merge_$iter/$name.assembled.fastq $outpath/merge_$iter/$name.fq";
-		system($renamecmd);
+		unlink <$outpath/merge_$iter/$name.{unassembled,discarded}*>;
+		rename "$outpath/merge_$iter/$name.assembled.fastq", "$outpath/merge_$iter/$name.fq";
 		
 	} else {
 		print "One or both of $name files are empty, merging skipped\n" if $verbose;
@@ -328,7 +336,7 @@ sub find_pairs {
 	foreach my $file (@allfiles){
 	    my ($file_name,$dir)=fileparse($file);
 	    if($file_name =~ /(.+)_R([1|2])/){
-		$filepairs{$1}[$2-1]=$file;
+		$filepairs{$1}[$2-1] = $file;
 	    }else{
 		die "Input file $file does not contain '_R1' or '_R2' in name";
 	    }
