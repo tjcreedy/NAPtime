@@ -19,7 +19,7 @@ use Data::Dumper;
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.0.1"; #25/03/2019
+my $version = "0.0.2"; #02/04/2019
 my $help;
 my @files;
 my $outpath;
@@ -30,48 +30,39 @@ our $debug;
 
 my $script = basename($0,());
 
+# SET DEFAULTS
+$parameters{pearquality} = 0;
+
 # CREATE HELPFILE
 
 my $usage =<<USAGE;
 
 Description:
 
-	This is $script version $version of the NGS Amplicon Pipeline. It takes in a pair or set of paired files, such as those output from NAPdemux, and carries out a sequence of processes by calling external programs:
-		# Primer trimming - removes specified number of bases from F and R reads
-		# Merging - combining overlapping read pairs
-		# Filtering - removing poor quality reads 
-		# ITSx filtering - searching for fungal sequences (OPTIONAL)
-		# Read naming - adding the sample name to every read for future clustering and mapping
-	The script can run with each parameter specified with a single value, in which case it outputs a fasta for each pair of fastq files, or if parameter ranges are specified it will loop through every combination of all parameters and outputs a directory containing the fastas for each unique combination of parameters. Either way, a csv log file is output.
+	This is $script version $version of the NGS Amplicon Pipeline. It takes in a pair or set of paired fastq files and 'assembles' mate pair reads for each pair of files. Input files can be given in any order to the -input option, and pairs will be detected based on file name. File names must have _R1 or _R2 for forward and reverse read sets respectively, and anything after this name will be lost downstream. Mates must already be properly paired before running - this should be the case if you've previously run NAPdemux or NAPtrim.
+	
+	$script wraps PEAR to carry out merging. You may set PEAR option -q using the -pearquality argument.
+	
+	Optionally, $script can iterate through multiple values for parameters (i.e. -pearquality). Specify parameter ranges as "a-b/c", where a is the starting value, c is the value by which this increments each iteration, and b is the maximum. Note that if the difference between b and a is not divisible exactly by c, the final value of the parameter range will be a+xc where x is the integer quotient of b/a. I.e. if the range 4-9/2 is given, $script will run 3 times using, in turn, the values 4, 6 then 8. Alternatively, values can be given in a custom range of the form "a,b,c" where the precise values to be used are separated by commas. All combinations of all supplied parameter ranges will be run and the results output in separate folders for each iteration (combination).
 	
 	For more information, see https://github.com/tjcreedy/NAPtime/wiki/NAPmerge
 
 Usage:
 
 	Basic mode
-	$script -output <dir> -forwardprimerl <n> -reverseprimerl <n> -pearquality <n> -eemax <n> [-itsx <path/to/HMMs> -taxon_itsx <tax> -region_itsx <reg> -output_itsx <full>] [-threads <n>] [-verbose] <inputfqs>
+	$script -input <file_R1.fq> <file_R2.fq> [<file2_R1.fq> <file2_R2.fq] -outpath <merge/> -pearquality <n> [-threads <n> -verbose]
 	
-	Parameter exploration mode
-	$script -output <dir> -forwardprimerl <n> -reverseprimerl <n> -pearquality <n-n,n> -eeemax <n-n,n> [-threads <n>] [-v] <inputfqs>
+	Parameter iteration mode
+	$script -input <file_R1.fq> <file_R2.fq> [<file2_R1.fq> <file2_R2.fq] -outpath <merge/> -pearquality <n-n/n> [-threads <n> -verbose]
 
 Arguments:
 
-	        outpath:  Path to a directory in which output files and the log table are written.
-	 forwardprimerl:  Number of bases to trim from the forward reads.
-	 reverseprimerl:  Number of bases to trim from the reverse reads.
-	fprimersequence:  A base sequence to trim from the forward reads.
-	rprimersequence:  A base sequence to trim from the reverse reads.
-	    primersfile:  Path to a file containing base sequences to trim - line 1 forward, line 2 reverse.
-	     stricttrim:  Should read pairs not matching one or both primer sequences be discarded?
-	    pearquality:  A value or range to pass to PEAR as a -q option.
-	          eemax:  A value or range to pass to USEARCH110 fastq_filter as a -fastq_maxee option
-	           itsx:  If ITSx is required, the path to HMMs to pass to the function. Optional.
-	     taxon_itsx:  If ITSx is used, the taxon or taxa (according to the ITSx requirements) to filter for. Required if using ITSx, default "all".
-	    region_itsx:  If ITSx is used, the region (according to the ITSx requirements) to filter for. Currently, only one region is accepted, do not list more than one. Required if using ITSx.
-	    output_itsx:  If ITSx is used, whether to output the complete region ("complete"), complete and partial regions ("partial") or the full sequence ("full") for matching reads. Required if using ITSx.
-	        threads:  Number of CPU threads to use. Default 1.
-	        verbose:  Reports on progress.
-	           help:  Prints out this helpful message.
+	      input:  One or more pairs of fastq files to merge reads within
+	    outpath:  Path to a directory in which output files and the log table are written.
+	pearquality:  A value or range to pass to PEAR as a -q option. Default 0
+	    threads:  Number of CPU threads to use. Default 1.
+	    verbose:  Reports on progress.
+	       help:  Prints out this helpful message.
 
 USAGE
 
