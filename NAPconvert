@@ -6,6 +6,7 @@ use strict;
 use Getopt::Long;
 use File::Basename;
 use File::Path qw(make_path remove_tree);
+use File::Copy qw(move);
 use File::Which;
 use List::Util qw(all any max); 
 use Algorithm::Loops qw(NestedLoops);
@@ -18,7 +19,7 @@ use Data::Dumper;
 # INITIALISE VARIABLES AND SET DEFAULTS
 #
 
-my $version = "0.0.3"; #24/03/2019
+my $version = "0.0.4"; #02/04/2019
 my $help;
 my @files;
 my $outpath;
@@ -39,7 +40,9 @@ Description:
 	
 	The headers of each output file are renamed to include the file name as a barcodelabel tag, and the output files are concatenated together to form a single fasta. Both the individual renamed and concatenated fasta are output.
 	
-	The script can run with the eemax parameter specified with a single value, in which case it outputs a fasta for each fastq file, or if parameter ranges are specified it will loop through every combination of all parameters and outputs a directory containing the fastas for each unique parameter. Multiple concatenated fastas will also be produced if iterating.A csv log file is output.
+	The script can run with the eemax parameter specified with a single value, in which case it outputs a fasta for each fastq file, or if parameter ranges are specified it will loop through every combination of all parameters and outputs a directory containing the fastas for each unique parameter. Multiple concatenated fastas will also be produced if iterating.
+	
+	A csv log file is also output, along with a single fasta called all_rename_[iteration#].fa for each iteration, that is the concatenation of all fastas output for that iteration.
 	
 	For more information, see https://github.com/tjcreedy/NAPtime/wiki/NAPconvert
 
@@ -48,7 +51,7 @@ Usage:
 	Basic
 	$script -input file.fq [file2.fq file3.fq] -output <dir> -eemax <n> [-threads <n>] [-verbose]
 	
-	Parameter exploration mode
+	Parameter exploration
 	$script -input file.fq [file2.fq file3.fq] -output <dir> -eemax <n-n/n> [-threads <n>] [-v]
 
 Arguments:
@@ -116,6 +119,10 @@ if(scalar @files == 0){
 	}
 }
 
+my %names = map { my $a = basename($_, ()); $a =~ s/\..*$//; $a => $_} @files;
+
+print "DEBUG: names hash:\n", Dumper \%names if $debug;
+
 # CHECK CONVERSION
 
 my $converttool = "usearch110";
@@ -168,9 +175,9 @@ $cpm->run_on_finish( sub {
 	$done_iterations++;
 	print "Completed $done_iterations/$total merging and filtering iterations\r";
 	my $iter = $data_structure_reference->{iter};
-	my $file = $data_structure_reference->{file};
+	my $name = $data_structure_reference->{name};
 	$empty_check{$iter} += (split(",", $data_structure_reference->{result}))[2];
-	$convert_log{$iter}{$file} = $data_structure_reference->{result};
+	$convert_log{$iter}{$name} = $data_structure_reference->{result};
 });
 
 # DO CONVERSION
@@ -179,12 +186,12 @@ printf "\nStarting %d conversion iterations using $threads threads\n", scalar ke
 
 foreach my $iter (keys %$iterations){
 	make_path("$outpath/convert_$iter");
-	foreach my $file (@files){
+	foreach my $name (keys %names){
 		my $pid = $cpm->start and next;
 		
-		my $out = convert($converttool,$iterations,$iter,$file,$outpath,$it_threads);
+		my $out = convert($converttool,$iterations,$iter,\%names, $name,$outpath,$it_threads);
 		
-		$cpm->finish(0, {result => $out, iter => $iter, file => $file});
+		$cpm->finish(0, {result => $out, iter => $iter, name => $name});
 	}
 #	remove_tree("$outpath/convert_$iter") unless $debug;
 }
@@ -207,6 +214,14 @@ foreach my $iter (keys %$iterations){
 
 print "DEBUG: convert log:\n", Dumper \%convert_log if $debug;
 
+# MOVE FILES IF ONLY ONE ITERATION
+
+if(scalar keys %$iterations == 1){
+	move "$outpath/convert_1/$_.fa", "$outpath/$_.fa" for keys %names;
+	remove_tree("$outpath/convert_1/");
+}
+
+
 ######################################################
 # DO LOG OUTPUT
 #
@@ -218,9 +233,8 @@ open my $log, '>', "$outpath/convert.log.csv" or die "Error opening csv log for 
 print $log join(',',('seqname' , 'iteration' ,'Max_expected_E-value', 'Filter_input_reads' , 'Filter_discarded' , 'Filter_converted')),"\n";
 
 foreach my $iter (sort keys %$iterations){
-	foreach my $file (sort @files){
-		(my $name = $file) =~ s/\.assembled\.fastq$//;
-		print $log "$name,$iter$convert_log{$iter}{$file}\n";
+	foreach my $name (sort keys %names){
+		print $log "$name,$iter$convert_log{$iter}{$name}\n";
 	}
 }
 
@@ -232,22 +246,18 @@ exit;
 
 sub convert {
 	# Load variables
-	my ($converttool, $iterations, $iter, $file, $outpath, $it_threads) = @_;
+	my ($converttool, $iterations, $iter, $names, $name, $outpath, $it_threads) = @_;
 	
 	# Do logging
 	my $log = ",${$iterations}{$iter}{eemax}";
 	
-	if(! -z $file){
-		my $name = basename($file, ());
-		
-		$name =~ s/\.assembled\.fastq$//;
-		
+	if(! -z ${$names}{$name}){
 		# CONVERSION
 		
-		print "Running $converttool fastq_filter on file $file for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
+		print "Running $converttool fastq_filter on file $name for iteration $iter with eemax ${$iterations}{$iter}{eemax}\n" if $verbose;
 		
 		# Create command
-		my $convert_cmd = "$converttool -fastq_filter $file -fastaout $outpath/convert_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
+		my $convert_cmd = "$converttool -fastq_filter ${$names}{$name} -fastaout $outpath/convert_$iter/$name.fa -fastq_maxee ${$iterations}{$iter}{eemax} -threads $it_threads 2>&1 1>/dev/null";
 		
 		# Run command
 		print "DEBUG: fastq_filter command:\n$convert_cmd\n" if $debug;
@@ -273,7 +283,7 @@ sub convert {
 		system($readlabelcmd);
 		
 	} else {
-		print "File $file is empty, conversion skipped\n" if $verbose;
+		print "File ${$names}{name} is empty, conversion skipped\n" if $verbose;
 		$log .= ",0,0,0";
 	}
 	
