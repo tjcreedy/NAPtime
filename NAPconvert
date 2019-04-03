@@ -160,13 +160,14 @@ printf "\n$script will run %d iterations on each of %d file pairs\n", scalar key
 
 # INITIALISE FORKER AND VARIABLES
 
-my $cpm = Parallel::ForkManager->new($threads);
+my $cpm = Parallel::ForkManager->new(1);
 my $done_iterations=0;
 my %convert_log;
 my %empty_check;
 my $total =  (scalar keys %$iterations) * (scalar @files);
-my $it_threads = int($threads/$total);
-$it_threads = 1 if($it_threads < 1);
+#my $it_threads = int($threads/$total);
+#$it_threads = 1 if($it_threads < 1);
+my $it_threads = $threads;
 
 # SET UP COMPLETION CLEANER
 
