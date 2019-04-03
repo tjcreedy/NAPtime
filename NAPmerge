@@ -172,20 +172,21 @@ my $mpm = Parallel::ForkManager->new(1);
 my $done_iterations=0;
 my %merge_log;
 my $total =  (scalar keys %$iterations) * (scalar keys %paired_files);
-my $it_threads = $threads/$total;
-$it_threads = 1 if($it_threads < 1);
+#my $it_threads = int($threads/$total);
+#$it_threads = 1 if($it_threads < 1);
+my $it_threads = $threads;
 
 # SET UP COMPLETION CLEANER
 
 $mpm->run_on_finish( sub {
 	my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_structure_reference) = @_;
 	$done_iterations++;
-	print "Completed $done_iterations/$total merging and filtering iterations\r";
+	print "Completed $done_iterations/$total merges\r";
 	my $iter = $data_structure_reference->{iter};
 	my $name = $data_structure_reference->{name};
 	$merge_log{$iter}{$name} = $data_structure_reference->{result};
 });
-
+ 
 # DO MERGING
 
 printf "\nStarting %d merging iterations using $threads threads\n", scalar keys %$iterations if $verbose;
