@@ -165,9 +165,9 @@ if($blastskip){
 	if(! $blastpath){
 		my $host = hostname;
 		my %paths = (
-			'ctag' => '/db/db/blastdb-2018-06-17/nt',
-			'hpc-watson' => '/db/blastdb-2018-06-17/nt',
-			'hpc-crick' => '/db/blastdb-2018-06-17/nt'
+			'ctag' => '/db/db/blastdb-2019-10-21/nt',
+			'hpc-watson' => '/db/blastdb-2019-10-21/nt',
+			'hpc-crick' => '/db/blastdb-2019-10-21/nt'
 		);
 		if(exists($paths{$host})){
 			$blastpath = $paths{$host};
