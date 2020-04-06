@@ -879,6 +879,7 @@ sub parse_parameters {
 		if($lfilters){
 			if($lfilters == 1){
 				if($iterhash{$it}{minlength} eq 'NA' and $iterhash{$it}{maxlength} eq 'NA'){
+					$iterhash{$it}{base_var} = 0;
 					$iterhash{$it}{base_var} = int(0.5 + ($iterhash{$it}{seqlength} / 100) * $iterhash{$it}{pc_var}) if($iterhash{$it}{pc_var} ne 'NA');
 					$iterhash{$it}{base_var} = $iterhash{$it}{codon_var} * 3 if($iterhash{$it}{codon_var} ne 'NA');
 					@{$iterhash{$it}}{('minlength', 'maxlength')} = ($iterhash{$it}{seqlength} - $iterhash{$it}{base_var}, $iterhash{$it}{seqlength} + $iterhash{$it}{base_var});
