@@ -868,7 +868,7 @@ sub parse_parameters {
 		
 		# Set up check on length parameters
 		my $lfilters;
-		foreach my $lf ( @{$iterhash{$it}}{('pc_var', 'base_var', 'codon_var', 'minlength', 'maxlength')} ){
+		foreach my $lf ( @{$iterhash{$it}}{('pc_var', 'base_var', 'codon_var', 'minlength', 'maxlength', 'seqlength')} ){
 			$lfilters++ if $lf ne 'NA';
 		}
 		
