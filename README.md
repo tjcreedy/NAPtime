@@ -1,8 +1,7 @@
-These scripts are DEPRECATED and are unlikely to be work or be useful. See the metabarcoding and barcoding pipelines in my [https://github.com/tjcreedy/pipelines](pipelines) 
-repository, or learn more about metabarcoding at our [https://learnmetabarcoding.github.io](Learn Metabarcoding) course.
+These scripts are DEPRECATED and are unlikely to be work or be useful. See the metabarcoding and barcoding pipelines in my [pipelines](https://github.com/tjcreedy/pipelines) repository, or learn more about metabarcoding at our [Learn Metabarcoding course](https://learnmetabarcoding.github.io).
 
 
-
+---------------------------------------------------------
 
 NAPtime is a set of perl scripts to efficiently process amplicons from NGS. 
 
